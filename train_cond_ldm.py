@@ -15,6 +15,9 @@ from denoising_diffusion_pytorch.data import *
 from torch.utils.data import DataLoader
 from multiprocessing import cpu_count
 from fvcore.common.config import CfgNode
+import wandb
+import os
+from pathlib import Path
 
 
 def parse_args():
@@ -121,17 +124,27 @@ def main(args):
                     break
                 if isinstance(trainer.model, nn.parallel.DistributedDataParallel):
                     all_images, *_ = trainer.model.module.sample(batch_size=datatmp['cond'].shape[0],
-                                                  cond=datatmp['cond'].to(trainer.accelerator.device),
-                                                  mask=datatmp['ori_mask'].to(trainer.accelerator.device) if 'ori_mask' in datatmp else None)
+                                                                 cond=datatmp['cond'].to(trainer.accelerator.device),
+                                                                 mask=datatmp['ori_mask'].to(
+                                                                     trainer.accelerator.device) if 'ori_mask' in datatmp else None)
                 elif isinstance(trainer.model, nn.Module):
                     all_images, *_ = trainer.model.sample(batch_size=datatmp['cond'].shape[0],
-                                                  cond=datatmp['cond'].to(trainer.accelerator.device),
-                                                  mask=datatmp['ori_mask'].to(trainer.accelerator.device) if 'ori_mask' in datatmp else None)
+                                                          cond=datatmp['cond'].to(trainer.accelerator.device),
+                                                          mask=datatmp['ori_mask'].to(
+                                                              trainer.accelerator.device) if 'ori_mask' in datatmp else None)
 
-            # all_images = torch.cat(all_images_list, dim = 0)
             nrow = 2 ** math.floor(math.log2(math.sqrt(data_cfg.batch_size)))
-            tv.utils.save_image(all_images, str(trainer.results_folder / f'sample-{train_cfg.resume_milestone}_{model_cfg.sampling_timesteps}.png'), nrow=nrow)
+            # Save locally
+            tv.utils.save_image(all_images,
+                                str(trainer.results_folder / f'sample-{train_cfg.resume_milestone}_{model_cfg.sampling_timesteps}.png'),
+                                nrow=nrow)
+
+            # Log initial test to wandb
+            grid = tv.utils.make_grid(all_images, nrow=nrow)
+            wandb.log({"test_before_samples": [wandb.Image(grid, caption="Test Before Training")]})
+
             torch.cuda.empty_cache()
+
     trainer.train()
     pass
 
@@ -179,11 +192,10 @@ class Trainer(object):
         self.train_num_steps = train_num_steps
         self.image_size = model.image_size
 
+        # Initialize best loss to infinity
+        self.best_loss = float('inf')
+
         # dataset and dataloader
-
-        # self.ds = Dataset(folder, mask_folder, self.image_size, augment_horizontal_flip = augment_horizontal_flip, convert_image_to = convert_image_to)
-        # dl = DataLoader(self.ds, batch_size = train_batch_size, shuffle = True, pin_memory = True, num_workers = cpu_count())
-
         dl = self.accelerator.prepare(data_loader)
         self.dl = cycle(dl)
 
@@ -192,6 +204,7 @@ class Trainer(object):
                                      lr=train_lr, weight_decay=train_wd)
         lr_lambda = lambda iter: max((1 - iter / train_num_steps) ** 0.96, cfg.trainer.min_lr)
         self.lr_scheduler = torch.optim.lr_scheduler.LambdaLR(self.opt, lr_lambda=lr_lambda)
+
         # for logging results in a folder periodically
         if self.accelerator.is_main_process:
             self.results_folder = Path(results_folder)
@@ -200,18 +213,26 @@ class Trainer(object):
                            update_after_step=cfg.trainer.ema_update_after_step,
                            update_every=cfg.trainer.ema_update_every)
 
-        # step counter state
+            # --- Initialize WandB ---
+            wandb.init(
+                project=cfg.get('project_name', 'diffusion-model'),
+                name=cfg.get('run_name', None),
+                config=dict(cfg),
+                resume="allow" if self.enable_resume else False
+            )
 
+        # step counter state
         self.step = 0
 
         # prepare model, dataloader, optimizer with accelerator
-
         self.model, self.opt, self.lr_scheduler = \
             self.accelerator.prepare(self.model, self.opt, self.lr_scheduler)
         self.logger = create_logger(root_dir=results_folder)
         self.logger.info(cfg)
         self.writer = SummaryWriter(results_folder)
         self.results_folder = Path(results_folder)
+
+        # --- REVERTED: Strict resume logic ---
         resume_file = str(self.results_folder / f'model-{resume_milestone}.pt')
         if os.path.isfile(resume_file):
             self.load(resume_milestone)
@@ -219,30 +240,38 @@ class Trainer(object):
     def save(self, milestone):
         if not self.accelerator.is_local_main_process:
             return
+
+        # We need to support both integer milestones and string 'best'
+        filename = f'model-{milestone}.pt'
+        save_path = str(self.results_folder / filename)
+
         if self.enable_resume:
             data = {
                 'step': self.step,
+                'best_loss': self.best_loss,  # Save this so we don't reset best_loss on resume
                 'model': self.accelerator.get_state_dict(self.model),
                 'opt': self.opt.state_dict(),
                 'lr_scheduler': self.lr_scheduler.state_dict(),
                 'ema': self.ema.state_dict(),
                 'scaler': self.accelerator.scaler.state_dict() if exists(self.accelerator.scaler) else None
             }
-            # data_only_model = {'ema': self.ema.state_dict(),}
-            torch.save(data, str(self.results_folder / f'model-{milestone}.pt'))
+            torch.save(data, save_path)
         else:
             data = {
                 'model': self.accelerator.get_state_dict(self.model),
+                'best_loss': self.best_loss
             }
-            torch.save(data, str(self.results_folder / f'model-{milestone}.pt'))
+            torch.save(data, save_path)
 
     def load(self, milestone):
-        assert self.enable_resume; 'resume is available only if self.enable_resume is True !'
-        accelerator = self.accelerator
-        device = accelerator.device
+        assert self.enable_resume, 'resume is available only if self.enable_resume is True !'
 
-        data = torch.load(str(self.results_folder / f'model-{milestone}.pt'),
-                          map_location=lambda storage, loc: storage)
+        # --- REVERTED: Strict loading logic ---
+        # It will look exactly for 'model-{milestone}.pt'
+        filename = f'model-{milestone}.pt'
+        load_path = str(self.results_folder / filename)
+
+        data = torch.load(load_path, map_location=lambda storage, loc: storage)
 
         model = self.accelerator.unwrap_model(self.model)
         model.load_state_dict(data['model'])
@@ -252,11 +281,17 @@ class Trainer(object):
         self.step = data['step']
         self.opt.load_state_dict(data['opt'])
         self.lr_scheduler.load_state_dict(data['lr_scheduler'])
+
+        # If best_loss exists in the file, restore it. Otherwise default to inf.
+        self.best_loss = data.get('best_loss', float('inf'))
+
         if self.accelerator.is_main_process:
             self.ema.load_state_dict(data['ema'])
 
         if exists(self.accelerator.scaler) and exists(data['scaler']):
             self.accelerator.scaler.load_state_dict(data['scaler'])
+
+        print(f"Resumed from {load_path} at step {self.step}. Best loss so far: {self.best_loss}")
 
     def train(self):
         accelerator = self.accelerator
@@ -268,7 +303,6 @@ class Trainer(object):
                 total_loss = 0.
                 total_loss_dict = {'loss_simple': 0., 'loss_vlb': 0., 'total_loss': 0., 'lr': 5e-5}
                 for ga_ind in range(self.gradient_accumulate_every):
-                    # data = next(self.dl).to(device)
                     batch = next(self.dl)
                     for key in batch.keys():
                         if isinstance(batch[key], torch.Tensor):
@@ -293,8 +327,6 @@ class Trainer(object):
                         total_loss_dict['loss_simple'] += loss_simple
                         total_loss_dict['loss_vlb'] += loss_vlb
                         total_loss_dict['total_loss'] += total_loss
-                        # total_loss_dict['s_fact'] = self.model.module.scale_factor
-                        # total_loss_dict['s_bias'] = self.model.module.scale_bias
 
                     self.accelerator.backward(loss)
                 total_loss_dict['lr'] = self.opt.param_groups[0]['lr']
@@ -305,60 +337,88 @@ class Trainer(object):
 
                 if self.step % self.log_freq == 0:
                     if accelerator.is_main_process:
-                        # pbar.desc = describtions
-                        # self.logger.info(pbar.__str__())
                         self.logger.info(describtions)
 
                 accelerator.clip_grad_norm_(filter(lambda p: p.requires_grad, self.model.parameters()), 1.0)
-                # pbar.set_description(f'loss: {total_loss:.4f}')
                 accelerator.wait_for_everyone()
 
                 self.opt.step()
                 self.opt.zero_grad()
                 self.lr_scheduler.step()
+
                 if accelerator.is_main_process:
+                    # Tensorboard logging
                     self.writer.add_scalar('Learning_Rate', self.opt.param_groups[0]['lr'], self.step)
                     self.writer.add_scalar('total_loss', total_loss, self.step)
                     self.writer.add_scalar('loss_simple', loss_simple, self.step)
                     self.writer.add_scalar('loss_vlb', loss_vlb, self.step)
 
+                    # --- WandB Logging ---
+                    wandb.log({
+                        'train/learning_rate': self.opt.param_groups[0]['lr'],
+                        'train/total_loss': total_loss,
+                        'train/loss_simple': loss_simple,
+                        'train/loss_vlb': loss_vlb
+                    }, step=self.step)
+
                 accelerator.wait_for_everyone()
 
                 self.step += 1
-                # if self.step >= int(self.train_num_steps * 0.2):
+
                 if accelerator.is_main_process:
                     self.ema.to(device)
                     self.ema.update()
 
                     if self.step != 0 and self.step % self.save_and_sample_every == 0:
                         milestone = self.step // self.save_and_sample_every
-                        self.save(milestone)
+
+                        # --- MODIFIED: Save ONLY if Best Model ---
+                        if total_loss < self.best_loss:
+                            previous_best = self.best_loss
+                            self.best_loss = total_loss
+                            self.logger.info(
+                                f"Improvement found (Loss: {previous_best:.5f} -> {self.best_loss:.5f}). Saving model-best.pt")
+
+                            # Save specifically as 'best'
+                            self.save('best')
+
+                            wandb.log({'train/best_loss': self.best_loss}, step=self.step)
+                        else:
+                            self.logger.info(
+                                f"No improvement (Loss: {total_loss:.5f} >= Best: {self.best_loss:.5f}). Skipping save.")
+
+                        # --- Sampling Logic (Always runs to monitor visual progress) ---
                         self.model.eval()
-                        # self.ema.ema_model.eval()
 
                         with torch.no_grad():
-                            # img = self.dl
-                            # batches = num_to_groups(self.num_samples, self.batch_size)
-                            # all_images_list = list(map(lambda n: self.model.module.validate_img(ns=self.batch_size), batches))
                             if isinstance(self.model, nn.parallel.DistributedDataParallel):
-                                # all_images = self.model.module.sample(batch_size=self.batch_size)
                                 all_images, *_ = self.model.module.sample(batch_size=batch['cond'].shape[0],
-                                                  cond=batch['cond'],
-                                                  mask=batch['ori_mask'] if 'ori_mask' in batch else None)
+                                                                          cond=batch['cond'],
+                                                                          mask=batch[
+                                                                              'ori_mask'] if 'ori_mask' in batch else None)
                             elif isinstance(self.model, nn.Module):
-                                # all_images = self.model.sample(batch_size=self.batch_size)
                                 all_images, *_ = self.model.sample(batch_size=batch['cond'].shape[0],
-                                                  cond=batch['cond'],
-                                                  mask=batch['ori_mask'] if 'ori_mask' in batch else None)
-                            # all_images = torch.clamp((all_images + 1.0) / 2.0, min=0.0, max=1.0)
+                                                                   cond=batch['cond'],
+                                                                   mask=batch[
+                                                                       'ori_mask'] if 'ori_mask' in batch else None)
 
-                        # all_images = torch.cat(all_images_list, dim = 0)
-                        # nrow = 2 ** math.floor(math.log2(math.sqrt(self.batch_size)))
                         nrow = 2 ** math.floor(math.log2(math.sqrt(batch['cond'].shape[0])))
+
+                        # Save local copy of samples with milestone number
                         tv.utils.save_image(all_images, str(self.results_folder / f'sample-{milestone}.png'), nrow=nrow)
+
+                        # --- Log Images to WandB ---
+                        grid = tv.utils.make_grid(all_images, nrow=nrow)
+                        wandb.log({
+                            "samples": [wandb.Image(grid, caption=f"Sample Step {self.step}")]
+                        }, step=self.step)
+
                         self.model.train()
                 accelerator.wait_for_everyone()
                 pbar.update(1)
+
+        if accelerator.is_main_process:
+            wandb.finish()
 
         accelerator.print('training complete')
 
@@ -366,4 +426,3 @@ class Trainer(object):
 if __name__ == "__main__":
     args = parse_args()
     main(args)
-    pass

@@ -37,7 +37,6 @@ def parse_args():
     args.cfg = load_conf(args.cfg)
     return args
 
-
 def main(args):
     cfg = CfgNode(args.cfg)
     torch.manual_seed(42)
@@ -47,6 +46,8 @@ def main(args):
     # writer = SummaryWriter(cfg['out_path'])
     model_cfg = cfg.model
     first_stage_cfg = model_cfg.first_stage
+    from denoising_diffusion_pytorch.encoder_decoder import AutoencoderKL
+
     first_stage_model = AutoencoderKL(
         ddconfig=first_stage_cfg.ddconfig,
         lossconfig=first_stage_cfg.lossconfig,

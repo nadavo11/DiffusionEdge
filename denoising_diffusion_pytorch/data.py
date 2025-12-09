@@ -79,6 +79,9 @@ class AdaptEdgeDataset(data.Dataset):
         # ])
         self.data_list = self.build_list()
 
+        #remove .db files
+        self.data_list = [item for item in self.data_list if not item[0].endswith('.db') and not item[1].endswith('.db')]
+
         self.transform = transforms.Compose([
             # Resize(self.image_size, interpolation=InterpolationMode.BILINEAR, interpolation2=InterpolationMode.NEAREST),
             transforms.ToTensor()])
@@ -197,6 +200,9 @@ class EdgeDataset(data.Dataset):
 
         self.data_list = self.build_list()
 
+        # remove .db files
+        self.data_list = [item for item in self.data_list if not item[0].endswith('.db') and not item[1].endswith('.db')]
+
         # self.transform = Compose([
         #     Resize(image_size),
         #     RandomHorizontalFlip() if augment_horizontal_flip else Identity(),
@@ -277,7 +283,10 @@ class EdgeDataset(data.Dataset):
         return samples
 
     def __getitem__(self, index):
+
+
         img_path, edge_path = self.data_list[index]
+
         # edge_path = self.edge_paths[index]
         # img_path = self.img_paths[index]
         img_name = os.path.basename(img_path)
