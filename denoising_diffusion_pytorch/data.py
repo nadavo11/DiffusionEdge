@@ -269,17 +269,61 @@ class EdgeDataset(data.Dataset):
 
     def build_list(self):
         data_root = os.path.abspath(self.data_root)
-        images_path = os.path.join(data_root, 'image')
-        labels_path = os.path.join(data_root, 'edge')
+        # Support both:
+        # 1) split layout: <root>/image/<split> + <root>/edge/<split>
+        # 2) flat layout : <root>/images + <root>/edges
+        layout_candidates = [
+            (os.path.join(data_root, 'image'), os.path.join(data_root, 'edge')),
+            (os.path.join(data_root, 'images'), os.path.join(data_root, 'edges')),
+        ]
+
+        images_path = labels_path = None
+        for img_dir, edge_dir in layout_candidates:
+            if os.path.isdir(img_dir) and os.path.isdir(edge_dir):
+                images_path, labels_path = img_dir, edge_dir
+                break
+
+        if images_path is None or labels_path is None:
+            raise FileNotFoundError(
+                f'Cannot find dataset layout under "{data_root}". '
+                f'Expected either image/edge or images/edges folders.'
+            )
+
+        valid_exts = {'.jpg', '.jpeg', '.png', '.bmp', '.ppm', '.pgm', '.tif', '.tiff'}
+        entries = sorted(os.listdir(images_path))
+        has_split_subdirs = any(os.path.isdir(os.path.join(images_path, e)) for e in entries)
 
         samples = []
-        for directory_name in os.listdir(images_path):
-            image_directories = os.path.join(images_path, directory_name)
-            for file_name_ext in os.listdir(image_directories):
+        if has_split_subdirs:
+            for directory_name in entries:
+                image_dir = os.path.join(images_path, directory_name)
+                if not os.path.isdir(image_dir):
+                    continue
+                label_dir = os.path.join(labels_path, directory_name)
+                if not os.path.isdir(label_dir):
+                    continue
+                for file_name_ext in sorted(os.listdir(image_dir)):
+                    file_name = os.path.basename(file_name_ext)
+                    image_path = fit_img_postfix(os.path.join(image_dir, file_name))
+                    lb_path = fit_img_postfix(os.path.join(label_dir, file_name))
+                    if os.path.splitext(image_path)[1].lower() not in valid_exts:
+                        continue
+                    if os.path.isfile(image_path) and os.path.isfile(lb_path):
+                        samples.append((image_path, lb_path))
+        else:
+            for file_name_ext in entries:
                 file_name = os.path.basename(file_name_ext)
-                image_path = fit_img_postfix(os.path.join(images_path, directory_name, file_name))
-                lb_path = fit_img_postfix(os.path.join(labels_path, directory_name, file_name))
-                samples.append((image_path, lb_path))
+                image_path = fit_img_postfix(os.path.join(images_path, file_name))
+                lb_path = fit_img_postfix(os.path.join(labels_path, file_name))
+                if os.path.splitext(image_path)[1].lower() not in valid_exts:
+                    continue
+                if os.path.isfile(image_path) and os.path.isfile(lb_path):
+                    samples.append((image_path, lb_path))
+
+        if len(samples) == 0:
+            raise FileNotFoundError(
+                f'No paired image/edge samples found under "{images_path}" and "{labels_path}".'
+            )
         return samples
 
     def __getitem__(self, index):

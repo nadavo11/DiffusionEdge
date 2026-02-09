@@ -9,13 +9,14 @@
       <change afterPath="$PROJECT_DIR$/.idea/copilot.data.migration.ask.xml" afterDir="false" />
       <change afterPath="$PROJECT_DIR$/.idea/copilot.data.migration.ask2agent.xml" afterDir="false" />
       <change afterPath="$PROJECT_DIR$/.idea/copilot.data.migration.edit.xml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/Dockerfile" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/configs/RWTD_sample.yaml" afterDir="false" />
       <change afterPath="$PROJECT_DIR$/tst.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/.idea/Mask-Conditioned-Latent-Space-Diffusion.iml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/Mask-Conditioned-Latent-Space-Diffusion.iml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/.idea/misc.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/misc.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/ReadMe.md" beforeDir="false" afterPath="$PROJECT_DIR$/ReadMe.md" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/configs/BSDS_train.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/configs/BSDS_train.yaml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/demo.py" beforeDir="false" afterPath="$PROJECT_DIR$/demo.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/denoising_diffusion_pytorch/data.py" beforeDir="false" afterPath="$PROJECT_DIR$/denoising_diffusion_pytorch/data.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/denoising_diffusion_pytorch/mask_cond_unet.py" beforeDir="false" afterPath="$PROJECT_DIR$/denoising_diffusion_pytorch/mask_cond_unet.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/train_cond_ldm.py" beforeDir="false" afterPath="$PROJECT_DIR$/train_cond_ldm.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
@@ -67,8 +68,9 @@
     "RunOnceActivity.git.unshallow": "true",
     "RunOnceActivity.typescript.service.memoryLimit.init": "true",
     "SHARE_PROJECT_CONFIGURATION_FILES": "true",
+    "ai.playground.ignore.import.keys.banner.in.settings": "true",
     "git-widget-placeholder": "main",
-    "last_opened_file_path": "/home/nada/PycharmProjects/DiffusionEdge/BSDS/edge/train",
+    "last_opened_file_path": "/home/nada/PycharmProjects/DiffusionEdge",
     "node.js.detected.package.eslint": "true",
     "node.js.detected.package.tslint": "true",
     "node.js.selected.package.eslint": "(autodetect)",
@@ -80,15 +82,17 @@
 }]]></component>
   <component name="RecentsManager">
     <key name="CopyFile.RECENT_KEYS">
+      <recent name="$PROJECT_DIR$/configs" />
+      <recent name="$PROJECT_DIR$" />
+      <recent name="$PROJECT_DIR$/checkpoints" />
       <recent name="$PROJECT_DIR$/BSDS/edge/train" />
       <recent name="$PROJECT_DIR$/BSDS/edge/val" />
-      <recent name="$PROJECT_DIR$" />
     </key>
     <key name="MoveFile.RECENT_KEYS">
       <recent name="$PROJECT_DIR$/BSDS/image" />
     </key>
   </component>
-  <component name="RunManager">
+  <component name="RunManager" selected="Python.demo">
     <configuration name="demo" type="PythonConfigurationType" factoryName="Python" nameIsGenerated="true">
       <module name="Mask-Conditioned-Latent-Space-Diffusion" />
       <option name="ENV_FILES" value="" />
@@ -171,8 +175,8 @@
   <component name="SharedIndexes">
     <attachedChunks>
       <set>
-        <option value="bundled-js-predefined-d6986cc7102b-c7e53b3be11b-JavaScript-PY-253.28294.336" />
-        <option value="bundled-python-sdk-0978a7220b69-9867c7d4c0a4-com.jetbrains.pycharm.pro.sharedIndexes.bundled-PY-253.28294.336" />
+        <option value="bundled-js-predefined-d6986cc7102b-9b0f141eb926-JavaScript-PY-253.30387.173" />
+        <option value="bundled-python-sdk-4762d8aabb82-6d6dccd035ac-com.jetbrains.pycharm.pro.sharedIndexes.bundled-PY-253.30387.173" />
       </set>
     </attachedChunks>
   </component>
@@ -188,6 +192,9 @@
       <workItem from="1764938746912" duration="2584000" />
       <workItem from="1765111236520" duration="32000" />
       <workItem from="1765196810302" duration="19546000" />
+      <workItem from="1766320643132" duration="4203000" />
+      <workItem from="1767096310743" duration="810000" />
+      <workItem from="1770578372210" duration="9117000" />
     </task>
     <task id="LOCAL-00011" summary="first commit">
       <created>1701425247815</created>
@@ -577,7 +584,7 @@
         </line-breakpoint>
         <line-breakpoint enabled="true" suspend="THREAD" type="python-line">
           <url>file://$PROJECT_DIR$/train_cond_ldm.py</url>
-          <line>99</line>
+          <line>124</line>
           <option name="timeStamp" value="6" />
         </line-breakpoint>
         <line-breakpoint enabled="true" suspend="THREAD" type="python-line">

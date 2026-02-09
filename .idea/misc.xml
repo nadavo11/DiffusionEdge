@@ -3,5 +3,5 @@
   <component name="Black">
     <option name="sdkName" value="Python 3.10 (DiffusionEdge)" />
   </component>
-  <component name="ProjectRootManager" version="2" project-jdk-name="Python 3.10 (DiffusionEdge)" project-jdk-type="Python SDK" />
+  <component name="ProjectRootManager" version="2" project-jdk-name="Remote 3.8 (sftp://researcher@132.66.150.69:22/home/researcher/.virtualenvs/DiffusionEdge/bin/python)" project-jdk-type="Python SDK" />
 </project>

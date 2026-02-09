@@ -15,9 +15,34 @@ from denoising_diffusion_pytorch.data import *
 from torch.utils.data import DataLoader
 from multiprocessing import cpu_count
 from fvcore.common.config import CfgNode
-import wandb
 import os
 from pathlib import Path
+
+try:
+    import wandb as _wandb
+    if not hasattr(_wandb, "init"):
+        raise ImportError("Imported module 'wandb' does not expose 'init' (likely namespace shadowing).")
+    wandb = _wandb
+    WANDB_ENABLED = True
+except Exception as wandb_error:
+    WANDB_ENABLED = False
+
+    class _WandbStub:
+        class Image:
+            def __init__(self, *args, **kwargs):
+                pass
+
+        def init(self, *args, **kwargs):
+            return None
+
+        def log(self, *args, **kwargs):
+            return None
+
+        def finish(self, *args, **kwargs):
+            return None
+
+    wandb = _WandbStub()
+    print(f"[WARN] WandB disabled: {wandb_error}")
 
 
 def parse_args():
