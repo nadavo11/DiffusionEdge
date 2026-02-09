@@ -75,3 +75,10 @@ sampler:
   use_ema: False                   # ← set True only if your ckpt has ema and demo uses it
   save_folder: './results_rwtd'    # ← or whatever output dir you like
   ckpt_path: "checkpoints/my-best.pt"   # ←_
+  eval_enabled: False
+  eval_mode: edge
+  eval_gt_dir: 'RWTD/edge/train'
+  eval_img_dir: 'RWTD/image/train'
+  eval_out_dir: './results_rwtd/eval'
+  eval_preview_limit: 24
+  eval_nproc: 4

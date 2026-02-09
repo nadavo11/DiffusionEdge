@@ -82,3 +82,35 @@ trainer:
   test_before: True
   ema_update_after_step: 5000
   ema_update_every: 10
+  eval:
+    enabled: True
+    run_at_step0: True
+    every_steps: 200
+    split: val
+    batch_size: 1
+    num_workers: 2
+    num_batches: 64
+    mode: edge
+    thresholds: 99
+    max_dist: 0.0075
+    apply_nms: True
+    apply_thinning: True
+    nproc: 4
+    preview_limit: 12
+    select_best_metric: edge/AP
+    rwtd:
+      enabled: True
+      log_prefix: rwtd
+      data_root: RWTD
+      split: val
+      batch_size: 1
+      num_workers: 2
+      num_batches: 8
+      mode: edge
+      thresholds: 99
+      max_dist: 0.0075
+      apply_nms: True
+      apply_thinning: True
+      nproc: 4
+      preview_limit: 4
+      select_best_metric: edge/AP

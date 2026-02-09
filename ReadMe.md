@@ -12,8 +12,8 @@ This README is rewritten for the current code in this repository, with special f
 | Script | Purpose | Inputs | Outputs |
 |---|---|---|---|
 | `train_vae.py` | Train first-stage autoencoder (`AutoencoderKL`) | `--cfg` (YAML) | Checkpoints + preview images in `trainer.results_folder` |
-| `train_cond_ldm.py` | Train latent diffusion edge model (`LatentDiffusion`) | `--cfg` (YAML) | `model-best.pt`, samples, TensorBoard, logs, WandB |
-| `sample_cond_ldm.py` | Config-driven inference over an image directory | `--cfg` (YAML) | Predicted edge maps in `sampler.save_folder` |
+| `train_cond_ldm.py` | Train latent diffusion edge model (`LatentDiffusion`) with unified validation pipeline | `--cfg` (YAML) | `model-best.pt`, `eval/val_step_*` artifacts, samples, TensorBoard, logs, WandB |
+| `sample_cond_ldm.py` | Config-driven inference over an image directory (optional metrics + previews) | `--cfg` (YAML) + optional eval flags | Predicted edge maps in `sampler.save_folder`, optional `eval/` reports |
 | `demo.py` | CLI inference without editing checkpoint path inside YAML | `--input_dir`, `--pre_weight`, `--out_dir` (+ optional args) | Predicted edge maps in `--out_dir` |
 | `demo_trt.py` | TensorRT runtime inference | TRT engine + input images | Predicted edge maps in `--out_dir` |
 
@@ -34,6 +34,7 @@ pip install wandb
 ```
 
 `train_cond_ldm.py` imports and uses `wandb` directly, so install it explicitly.
+For `mode=edge` evaluation, also ensure `pyEdgeEval` is installed.
 
 ### 2.3 Accelerate setup (required for `accelerate launch ...`)
 ```bash
@@ -269,6 +270,19 @@ Then:
 python sample_cond_ldm.py --cfg configs/seams_sample.yaml
 ```
 
+## 5.4 Unified Eval Standard
+
+`train_cond_ldm.py` now uses a single evaluation code path for:
+- step-0 preflight eval (`trainer.eval.run_at_step0: True`)
+- periodic eval (`trainer.eval.every_steps`)
+
+That means any metric export, preview generation, and WandB eval logging that happens mid-training is exercised once before optimization starts.
+
+The shared evaluator lives in:
+- `eval/eval.py` (metrics)
+- `eval/previews.py` (Input/GT/Pred preview panels)
+- `eval/README.md` (module-level details)
+
 ## 6. CLI Reference
 
 ### 6.1 `train_vae.py`
@@ -288,6 +302,16 @@ python sample_cond_ldm.py --cfg configs/seams_sample.yaml
 | Name | Default | Type | Description |
 |---|---|---|---|
 | `--cfg` | None (required) | `str` | YAML config path for sampling/inference |
+| `--gt_dir` | `None` | `str` | Enable evaluation by providing GT directory (overrides config) |
+| `--img_dir` | `None` | `str` | Input image root for preview rendering (overrides config) |
+| `--eval_mode` | `None` | `str` | `binary` or `edge` (overrides config when set) |
+| `--eval_thresholds` | `None` | `str` | pyEdgeEval threshold spec in edge mode |
+| `--eval_max_dist` | `None` | `float` | pyEdgeEval max-distance in edge mode |
+| `--eval_apply_nms` | `False` | flag | Enable NMS in edge mode |
+| `--eval_apply_thinning` | `False` | flag | Enable thinning in edge mode |
+| `--eval_nproc` | `None` | `int` | pyEdgeEval worker count |
+| `--eval_preview_limit` | `None` | `int` | Max preview panels to save |
+| `--eval_out_dir` | `None` | `str` | Eval artifact output directory |
 
 ### 6.4 `demo.py`
 
@@ -333,6 +357,17 @@ python sample_cond_ldm.py --cfg configs/seams_sample.yaml
 | `trainer.test_before` | `True` | `bool` | Save/log a pre-training sample at start |
 | `trainer.ema_update_after_step` | `5000` | `int` | EMA warmup |
 | `trainer.ema_update_every` | `10` | `int` | EMA update interval |
+| `trainer.eval.enabled` | `True` | `bool` | Enable shared eval pipeline during training |
+| `trainer.eval.run_at_step0` | `True` | `bool` | Run preflight eval before optimization starts |
+| `trainer.eval.every_steps` | `200` | `int` | Eval cadence (same code path as step-0 eval) |
+| `trainer.eval.split` | `val` | `str` | Split to resolve under `image/<split>` + `edge/<split>` |
+| `trainer.eval.batch_size` | `1` | `int` | Eval loader batch size |
+| `trainer.eval.num_batches` | `64` | `int` | Cap eval iterations (`-1` for full set) |
+| `trainer.eval.mode` | `edge` | `str` | `binary` (sklearn) or `edge` (pyEdgeEval + sklearn) |
+| `trainer.eval.preview_limit` | `12` | `int` | Max triplets/previews logged per eval run |
+| `trainer.eval.select_best_metric` | `edge/AP` | `str` | Metric key used for best-eval tracking |
+| `trainer.eval.rwtd.enabled` | `False` | `bool` | Enable an additional RWTD eval target in the same step-0/periodic loop |
+| `trainer.eval.rwtd.num_batches` | `8` | `int` | Small RWTD subset size per eval cycle |
 
 ### 7.2 Sampling config (`sample_cond_ldm.py`)
 
@@ -347,6 +382,12 @@ python sample_cond_ldm.py --cfg configs/seams_sample.yaml
 | `sampler.use_ema` | `False` | `bool` | Load `ema` weights from checkpoint if available |
 | `sampler.save_folder` | `./results_rwtd` | `str` | Output folder |
 | `sampler.ckpt_path` | `"checkpoints/my-best.pt"` | `str` | Model checkpoint path |
+| `sampler.eval_enabled` | `False` | `bool` | Enable post-sampling evaluation |
+| `sampler.eval_mode` | `binary` | `str` | `binary` or `edge` |
+| `sampler.eval_gt_dir` | unset | `str` | GT directory used for metric computation |
+| `sampler.eval_img_dir` | `data.img_folder` | `str` | RGB directory used for previews |
+| `sampler.eval_out_dir` | `<save_folder>/eval` | `str` | Eval report output directory |
+| `sampler.eval_preview_limit` | `24` | `int` | Max preview panels to save |
 
 ## 8. Outputs, Logging, and Metrics
 
@@ -355,6 +396,10 @@ python sample_cond_ldm.py --cfg configs/seams_sample.yaml
   - Overwritten when a new best loss is found.
   - Contains model weights (`model`) and, when resume is enabled, optimizer/scheduler/EMA/scaler state.
 - `trainer.results_folder/sample-<milestone>.png`: periodic visual samples.
+- `trainer.results_folder/eval/val_step_XXXXXXX/`:
+  - `preds/`, `gt/`, `previews/`
+  - `metrics.json` (flattened scalar metrics)
+  - `eval_results.json` (full metric payload)
 - `trainer.results_folder/<timestamp>_.log`: logger output.
 - `trainer.results_folder/events.out.tfevents...`: TensorBoard.
 - WandB keys:
@@ -371,9 +416,10 @@ python sample_cond_ldm.py --cfg configs/seams_sample.yaml
 - Writes use direct `torch.save` / `tv.utils.save_image` calls (not atomic writes).
 
 ### 8.3 Quantitative evaluation
-- For `data.name == edge`, `sample_cond_ldm.py` exits right after writing predictions.
-- Built-in FID call in `sample_cond_ldm.py` is not used for edge mode.
-- Typical edge metrics (ODS/OIS/SEval/CEval) should be run with your external evaluator after prediction export.
+- `train_cond_ldm.py` runs the same validation pipeline at step 0 and at each `trainer.eval.every_steps`.
+- Validation artifacts are written to `trainer.results_folder/eval/val_step_XXXXXXX/{preds,gt,previews}`.
+- `sample_cond_ldm.py` can run standalone evaluation when `sampler.eval_enabled` is true or eval CLI flags are provided.
+- `mode=binary` computes sklearn AP/ROC-AUC; `mode=edge` additionally runs pyEdgeEval and saves JSON outputs.
 
 ## 9. Troubleshooting
 
@@ -408,6 +454,14 @@ Fix: ensure the directory is flat and contains supported image extensions.
 8. Training starts but quality is poor from the beginning  
 Cause: missing/incorrect first-stage checkpoint (`model.first_stage.ckpt_path`).  
 Fix: use a valid first-stage weight or explicitly train first stage first.
+
+9. Step-0 eval fails with missing GT files  
+Cause: `trainer.eval` points to an image split but no aligned GT split/stems.  
+Fix: set `trainer.eval.gt_dir` explicitly or fix dataset stem alignment.
+
+10. `mode=edge` fails with dependency import errors  
+Cause: pyEdgeEval is not installed in the current environment.  
+Fix: install `pyEdgeEval` or switch eval mode to `binary`.
 
 ## 10. Real-time TensorRT Inference (Optional)
 

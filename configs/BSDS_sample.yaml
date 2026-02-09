@@ -71,3 +71,10 @@ sampler:
   use_ema: False
   save_folder: './results'
   ckpt_path: "/data/huang/diffusion_edge/checkpoints/BSDS_swin_unet12_disloss_bs2x8/model-4.pt"
+  eval_enabled: False
+  eval_mode: edge
+  eval_gt_dir: '/data/yeyunfan/edge_detection_datasets/datasets/BSDS_test/edge'
+  eval_img_dir: '/data/yeyunfan/edge_detection_datasets/datasets/BSDS_test/image'
+  eval_out_dir: './results/eval'
+  eval_preview_limit: 24
+  eval_nproc: 4

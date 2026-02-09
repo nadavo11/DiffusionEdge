@@ -5,6 +5,8 @@ ema-pytorch
 pytorch-lightning==1.9.3
 scikit-learn
 scipy
+opencv-python
+pyEdgeEval
 thop
 timm==0.6.12
 tensorboard

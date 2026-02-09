@@ -4,9 +4,18 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="a57fb937-9c67-4f91-826e-8853fd385b4b" name="Changes" comment="update ReadMe.md">
-      <change afterPath="$PROJECT_DIR$/configs/synthetic_texture_to_RWTD_sample.yaml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/configs/synthetic_texture_train.yaml" afterDir="false" />
+    <list default="true" id="a57fb937-9c67-4f91-826e-8853fd385b4b" name="Changes" comment="update configs">
+      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/ReadMe.md" beforeDir="false" afterPath="$PROJECT_DIR$/ReadMe.md" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/configs/BSDS_sample.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/configs/BSDS_sample.yaml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/configs/BSDS_train.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/configs/BSDS_train.yaml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/configs/RWTD_sample.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/configs/RWTD_sample.yaml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/configs/synthetic_texture_to_RWTD_sample.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/configs/synthetic_texture_to_RWTD_sample.yaml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/configs/synthetic_texture_train.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/configs/synthetic_texture_train.yaml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/denoising_diffusion_pytorch/data.py" beforeDir="false" afterPath="$PROJECT_DIR$/denoising_diffusion_pytorch/data.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/requirement.txt" beforeDir="false" afterPath="$PROJECT_DIR$/requirement.txt" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/sample_cond_ldm.py" beforeDir="false" afterPath="$PROJECT_DIR$/sample_cond_ldm.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/train_cond_ldm.py" beforeDir="false" afterPath="$PROJECT_DIR$/train_cond_ldm.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -193,7 +202,7 @@
       <workItem from="1765196810302" duration="19546000" />
       <workItem from="1766320643132" duration="4203000" />
       <workItem from="1767096310743" duration="810000" />
-      <workItem from="1770578372210" duration="15039000" />
+      <workItem from="1770578372210" duration="23524000" />
     </task>
     <task id="LOCAL-00011" summary="first commit">
       <created>1701425247815</created>
@@ -538,7 +547,7 @@
       <option name="project" value="LOCAL" />
       <updated>1724331316050</updated>
     </task>
-    <option name="localTasksCounter" value="61" />
+    <option name="localTasksCounter" value="62" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -566,7 +575,8 @@
     <MESSAGE value="update ReadMe" />
     <MESSAGE value="fix demo_trt.py bug" />
     <MESSAGE value="update ReadMe.md" />
-    <option name="LAST_COMMIT_MESSAGE" value="update ReadMe.md" />
+    <MESSAGE value="update configs" />
+    <option name="LAST_COMMIT_MESSAGE" value="update configs" />
   </component>
   <component name="XDebuggerManager">
     <breakpoint-manager>
@@ -583,7 +593,7 @@
         </line-breakpoint>
         <line-breakpoint enabled="true" suspend="THREAD" type="python-line">
           <url>file://$PROJECT_DIR$/train_cond_ldm.py</url>
-          <line>124</line>
+          <line>424</line>
           <option name="timeStamp" value="6" />
         </line-breakpoint>
         <line-breakpoint enabled="true" suspend="THREAD" type="python-line">

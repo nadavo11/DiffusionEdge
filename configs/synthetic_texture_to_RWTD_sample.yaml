@@ -73,3 +73,10 @@ sampler:
   use_ema: False
   save_folder: './out_rwtd_from_synthetic'
   ckpt_path: './training/synthetic_texture_swin_unet12_disloss_bs2x8/model-best.pt'
+  eval_enabled: True
+  eval_mode: edge
+  eval_gt_dir: 'RWTD/edge/val'
+  eval_img_dir: 'RWTD/image/val'
+  eval_out_dir: './out_rwtd_from_synthetic/eval'
+  eval_preview_limit: 24
+  eval_nproc: 4

@@ -187,6 +187,8 @@ class EdgeDataset(data.Dataset):
         # self.img_folder = Path(os.path.join(data_root, "image", "aug"))
         self.data_root = data_root
         self.image_size = image_size
+        self.split = split
+        self.strict_split = bool(cfg.get('strict_split', False)) if isinstance(cfg, dict) else False
 
         # self.edge_paths = [p for ext in exts for p in self.edge_folder.rglob(f'*.{ext}')]
         # self.img_paths = [(self.img_folder / item.parent.name / f'{item.stem}.jpg') for item in self.edge_paths]
@@ -295,12 +297,29 @@ class EdgeDataset(data.Dataset):
 
         samples = []
         if has_split_subdirs:
-            for directory_name in entries:
+            if self.split not in (None, '', 'all'):
+                if self.split not in entries:
+                    if self.strict_split:
+                        raise FileNotFoundError(
+                            f'Requested split "{self.split}" not found under "{images_path}". '
+                            f'Available splits: {entries}'
+                        )
+                    split_entries = entries
+                else:
+                    split_entries = [self.split]
+            else:
+                split_entries = entries
+
+            for directory_name in split_entries:
                 image_dir = os.path.join(images_path, directory_name)
                 if not os.path.isdir(image_dir):
                     continue
                 label_dir = os.path.join(labels_path, directory_name)
                 if not os.path.isdir(label_dir):
+                    if self.strict_split and self.split not in (None, '', 'all'):
+                        raise FileNotFoundError(
+                            f'Missing edge split directory "{label_dir}" for requested split "{directory_name}".'
+                        )
                     continue
                 for file_name_ext in sorted(os.listdir(image_dir)):
                     file_name = os.path.basename(file_name_ext)
@@ -322,7 +341,8 @@ class EdgeDataset(data.Dataset):
 
         if len(samples) == 0:
             raise FileNotFoundError(
-                f'No paired image/edge samples found under "{images_path}" and "{labels_path}".'
+                f'No paired image/edge samples found under "{images_path}" and "{labels_path}"'
+                + (f' for split="{self.split}"' if self.split not in (None, '', 'all') else '.')
             )
         return samples
 
