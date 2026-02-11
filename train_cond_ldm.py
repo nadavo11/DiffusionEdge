@@ -435,6 +435,7 @@ def main(args):
         shuffle=True,
         pin_memory=True,
         num_workers=data_cfg.get("num_workers", 2),
+        prefetch_factor=4  # Add this! (CPU stays 4 batches ahead)
     )
 
     train_cfg = cfg.trainer

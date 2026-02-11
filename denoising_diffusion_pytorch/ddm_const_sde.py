@@ -415,7 +415,7 @@ class DDPM(nn.Module):
         C_pred, noise_pred = self.model(x_noisy, t, **kwargs)
         # C_pred = C_pred / torch.sqrt(t)
         # noise_pred = noise_pred / torch.sqrt(1 - t)
-        x_rec = self.pred_x0_from_xt(x_noisy, noise_pred, C_pred, t)       # x_rec:(B, 1, H, W)
+        x_rec = self.pred_x0_from_xt(x_noisy, noise_pred, C_pred, t).clamp(-2, 2)       # x_rec:(B, 1, H, W)
         loss_dict = {}
         prefix = 'train'
 
@@ -822,21 +822,56 @@ class LatentDiffusion(DDPM):
         return loss
 
     def cross_entropy_loss_RCF(self, prediction, labelf, beta=1.1):
-        # label = labelf.long()
+        # 1. Sanitize NaN/Inf immediately
+        if torch.isnan(labelf).any():
+            print("[Warning] NaN in label! Replacing with zeros.")
+            labelf = torch.nan_to_num(labelf, 0.0)
+
+        # 2. Clamp target (handles the overshoot)
+        labelf = torch.clamp(labelf, min=0.0, max=1.0)
+
+        # 3. Create fuzzy masks (handling interpolation)
+        # Instead of '== 1', use '> 0.5' to catch interpolated edge pixels
         label = labelf
         mask = labelf.clone()
 
-        num_positive = torch.sum(label == 1).float()
-        num_negative = torch.sum(label == 0).float()
+        # Count effective positives/negatives using threshold
+        num_positive = torch.sum(label > 0.5).float()
+        num_negative = torch.sum(label <= 0.5).float()
 
+        # 4. SAFETY: Prevent Division by Zero
+        # If the crop is perfectly empty or perfectly full, denominator is 0.
+        denominator = num_positive + num_negative
+        if denominator == 0:
+            denominator = 1.0  # Prevent NaN
+
+        # Create the mask weights
+        # Note: We use the same thresholds for assignment
         mask_temp = (label > 0) & (label <= 0.3)
         mask[mask_temp] = 0.
 
-        mask[label == 1] = 1.0 * num_negative / (num_positive + num_negative)
-        mask[label == 0] = beta * num_positive / (num_positive + num_negative)
+        # Safe division
+        pos_weight = 1.0 * num_negative / denominator
+        neg_weight = beta * num_positive / denominator
 
-        # mask[label == 2] = 0
-        cost = F.binary_cross_entropy(prediction, labelf, weight=mask, reduction='none')
+        mask[label > 0.5] = pos_weight
+        mask[label <= 0.5] = neg_weight
+
+        with torch.cuda.amp.autocast(enabled=False):
+            pred_safe = prediction.float().clamp(min=1e-6, max=1.0 - 1e-6)
+
+            # Check for NaNs in prediction (Model Divergence Check)
+            if torch.isnan(pred_safe).any():
+                print("!!! MODEL DIVERGED (NaN in Pred) !!!")
+                return torch.tensor(0.0, requires_grad=True, device=prediction.device)
+
+            cost = F.binary_cross_entropy(
+                pred_safe,
+                labelf.float(),
+                weight=mask.float(),
+                reduction='none'
+            )
+
         return cost.mean([1, 2, 3])
 
     @torch.no_grad()
