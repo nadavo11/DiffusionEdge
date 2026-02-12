@@ -573,6 +573,7 @@ class Trainer(object):
         self.eval_at_step0 = bool(self.eval_cfg.get("run_at_step0", cfg.trainer.get("test_before", True)))
         self.best_eval_scores: Dict[str, float] = {}
         self.best_eval_steps: Dict[str, int] = {}
+        self.last_eval_scores: Dict[str, float] = {}
 
         if self.eval_enabled:
             if self.eval_every_steps <= 0:
@@ -591,6 +592,7 @@ class Trainer(object):
 
                 self.best_eval_scores[target_name] = float("-inf")
                 self.best_eval_steps[target_name] = -1
+                self.last_eval_scores[target_name] = float("-inf")
 
         dl = self.accelerator.prepare(data_loader)
         self.dl = cycle(dl)
@@ -654,6 +656,7 @@ class Trainer(object):
                 "best_loss": self.best_loss,
                 "best_eval_scores": self.best_eval_scores,
                 "best_eval_steps": self.best_eval_steps,
+                "last_eval_scores": self.last_eval_scores,
                 "model": self.accelerator.get_state_dict(self.model),
                 "opt": self.opt.state_dict(),
                 "lr_scheduler": self.lr_scheduler.state_dict(),
@@ -667,6 +670,7 @@ class Trainer(object):
                 "best_loss": self.best_loss,
                 "best_eval_scores": self.best_eval_scores,
                 "best_eval_steps": self.best_eval_steps,
+                "last_eval_scores": self.last_eval_scores,
             }
             torch.save(data, save_path)
 
@@ -697,10 +701,17 @@ class Trainer(object):
         else:
             loaded_steps = {"val": int(data.get("best_eval_step", -1))}
 
+        # Restore last_eval_scores (backward compatible).
+        if "last_eval_scores" in data and isinstance(data["last_eval_scores"], dict):
+            loaded_last = {str(k): float(v) for k, v in data["last_eval_scores"].items()}
+        else:
+            loaded_last = {}
+
         for target in self.eval_targets:
             target_name = str(target.get("name", "val"))
             self.best_eval_scores[target_name] = float(loaded_scores.get(target_name, float("-inf")))
             self.best_eval_steps[target_name] = int(loaded_steps.get(target_name, -1))
+            self.last_eval_scores[target_name] = float(loaded_last.get(target_name, float("-inf")))
 
         if self.accelerator.is_main_process:
             self.ema.load_state_dict(data["ema"])
@@ -710,7 +721,8 @@ class Trainer(object):
 
         print(
             f"Resumed from {load_path} at step {self.step}. "
-            f"Best loss={self.best_loss:.6f}, best eval={self.best_eval_scores}"
+            f"Best loss={self.best_loss:.6f}, best eval={self.best_eval_scores}, "
+            f"last eval={self.last_eval_scores}"
         )
 
     @staticmethod
@@ -927,9 +939,23 @@ class Trainer(object):
         )
 
         selected_score = self._select_eval_metric(flat_metrics, eval_select_metric, log_prefix)
+
+        # Always track latest score.
+        if selected_score is not None:
+            self.last_eval_scores[target_name] = selected_score
+
+        # Save model-best.pt when selected eval metric improves.
+        is_new_best = False
         if selected_score is not None and selected_score > self.best_eval_scores.get(target_name, float("-inf")):
+            previous_best = self.best_eval_scores.get(target_name, float("-inf"))
             self.best_eval_scores[target_name] = selected_score
             self.best_eval_steps[target_name] = step
+            is_new_best = True
+            self.logger.info(
+                f"[Eval:{target_name}] New best {eval_select_metric}: "
+                f"{previous_best:.5f} -> {selected_score:.5f}. Saving model-best.pt"
+            )
+            self.save("best")
 
         with open(step_dir / "eval_results.json", "w", encoding="utf-8") as handle:
             json.dump(_jsonify(eval_result), handle, indent=2)
@@ -947,8 +973,10 @@ class Trainer(object):
         log_dict[f"{log_prefix}/preview_count"] = len(preview_paths)
         if selected_score is not None:
             log_dict[f"{log_prefix}/selected_metric"] = selected_score
+            log_dict[f"{log_prefix}/last_selected_metric"] = self.last_eval_scores.get(target_name, float("-inf"))
             log_dict[f"{log_prefix}/best_selected_metric"] = self.best_eval_scores.get(target_name, float("-inf"))
             log_dict[f"{log_prefix}/best_selected_metric_step"] = self.best_eval_steps.get(target_name, -1)
+            log_dict[f"{log_prefix}/is_new_best"] = 1.0 if is_new_best else 0.0
 
         if wandb_samples:
             triplets: List[Any] = []
@@ -967,7 +995,31 @@ class Trainer(object):
         self.logger.info(
             f"[Eval:{target_name}] step={step} reason={reason} "
             + " ".join(f"{k}={v:.4f}" for k, v in flat_metrics.items())
+            + f" | best({eval_select_metric})={self.best_eval_scores.get(target_name, float('-inf')):.4f}"
+            + f" last({eval_select_metric})={self.last_eval_scores.get(target_name, float('-inf')):.4f}"
         )
+
+        # Write/update performance_summary.json with best & last for all targets.
+        summary_path = self.checkpoint_folder / "performance_summary.json"
+        try:
+            if summary_path.is_file():
+                with open(summary_path, "r", encoding="utf-8") as fh:
+                    perf_summary = json.load(fh)
+            else:
+                perf_summary = {}
+        except (json.JSONDecodeError, OSError):
+            perf_summary = {}
+
+        perf_summary[target_name] = {
+            "select_best_metric": eval_select_metric,
+            "best_score": self.best_eval_scores.get(target_name, None),
+            "best_step": self.best_eval_steps.get(target_name, -1),
+            "last_score": self.last_eval_scores.get(target_name, None),
+            "last_step": step,
+            "all_metrics_last": _jsonify(flat_metrics),
+        }
+        with open(summary_path, "w", encoding="utf-8") as fh:
+            json.dump(perf_summary, fh, indent=2)
 
         self.model.train()
         return flat_metrics
@@ -1063,22 +1115,27 @@ class Trainer(object):
                     if self.step != 0 and self.step % self.save_and_sample_every == 0:
                         milestone = self.step // self.save_and_sample_every
 
-                        if total_loss < self.best_loss:
-                            previous_best = self.best_loss
-                            self.best_loss = total_loss
-                            self.logger.info(
-                                f"Improvement found (Loss: {previous_best:.5f} -> {self.best_loss:.5f}). "
-                                "Saving model-best.pt"
-                            )
-                            self.save("best")
-                            wandb.log({"train/best_loss": self.best_loss}, step=self.step)
-                        else:
-                            self.logger.info(
-                                f"No improvement (Loss: {total_loss:.5f} >= Best: {self.best_loss:.5f}). "
-                                "Skipping save."
-                            )
+                        # Always save model-last.pt.
+                        self.save("last")
+                        self.logger.info(
+                            f"Saved model-last.pt (step={self.step}, loss={total_loss:.5f})"
+                        )
 
+                        # When eval is disabled, fall back to loss-based best.
                         if not self.eval_enabled:
+                            if total_loss < self.best_loss:
+                                previous_best = self.best_loss
+                                self.best_loss = total_loss
+                                self.logger.info(
+                                    f"Improvement found (Loss: {previous_best:.5f} -> {self.best_loss:.5f}). "
+                                    "Saving model-best.pt"
+                                )
+                                self.save("best")
+                                wandb.log({"train/best_loss": self.best_loss}, step=self.step)
+                            else:
+                                self.logger.info(
+                                    f"No improvement (Loss: {total_loss:.5f} >= Best: {self.best_loss:.5f})."
+                                )
                             self._save_batch_sample(batch=batch, milestone=milestone, step=self.step)
 
                 if self.eval_enabled and self.step % self.eval_every_steps == 0:
