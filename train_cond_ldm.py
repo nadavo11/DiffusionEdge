@@ -594,6 +594,26 @@ class Trainer(object):
                 self.best_eval_steps[target_name] = -1
                 self.last_eval_scores[target_name] = float("-inf")
 
+            # Parse global select_best_metric: supports "<target>/<metric>" format,
+            # e.g. "rwtd/edge/AP" → target="rwtd", metric="edge/AP".
+            # If the first segment is not a known target name, treat the whole
+            # string as a metric key on the default "val" target.
+            global_sbm = str(self.eval_cfg.get("select_best_metric", "generic/AP"))
+            target_names = {str(t.get("name", "unknown")) for t in self.eval_targets}
+            parts = global_sbm.split("/", 1)
+            if len(parts) == 2 and parts[0] in target_names:
+                # e.g. "rwtd/edge/AP" → target="rwtd", remaining could be "edge/AP"
+                self.best_ckpt_target = parts[0]
+                self.best_ckpt_metric = parts[1]
+            else:
+                # e.g. "edge/AP" or "generic/AP" → default target is "val"
+                self.best_ckpt_target = "val"
+                self.best_ckpt_metric = global_sbm
+            print(
+                f"[Checkpoint] Best checkpoint driven by target='{self.best_ckpt_target}', "
+                f"metric='{self.best_ckpt_metric}'"
+            )
+
         dl = self.accelerator.prepare(data_loader)
         self.dl = cycle(dl)
 
@@ -944,18 +964,27 @@ class Trainer(object):
         if selected_score is not None:
             self.last_eval_scores[target_name] = selected_score
 
-        # Save model-best.pt when selected eval metric improves.
+        # Save model-best.pt when selected eval metric improves AND this is
+        # the designated best-checkpoint target.
         is_new_best = False
+        drives_best = (target_name == getattr(self, "best_ckpt_target", "val"))
         if selected_score is not None and selected_score > self.best_eval_scores.get(target_name, float("-inf")):
             previous_best = self.best_eval_scores.get(target_name, float("-inf"))
             self.best_eval_scores[target_name] = selected_score
             self.best_eval_steps[target_name] = step
-            is_new_best = True
-            self.logger.info(
-                f"[Eval:{target_name}] New best {eval_select_metric}: "
-                f"{previous_best:.5f} -> {selected_score:.5f}. Saving model-best.pt"
-            )
-            self.save("best")
+            if drives_best:
+                is_new_best = True
+                self.logger.info(
+                    f"[Eval:{target_name}] New best {eval_select_metric}: "
+                    f"{previous_best:.5f} -> {selected_score:.5f}. Saving model-best.pt"
+                )
+                self.save("best")
+            else:
+                self.logger.info(
+                    f"[Eval:{target_name}] New best {eval_select_metric}: "
+                    f"{previous_best:.5f} -> {selected_score:.5f} "
+                    f"(not the best-checkpoint target, skipping save)"
+                )
 
         with open(step_dir / "eval_results.json", "w", encoding="utf-8") as handle:
             json.dump(_jsonify(eval_result), handle, indent=2)
