@@ -259,6 +259,11 @@ def main(args):
             out_dir=str(eval_out_dir / "previews"),
             limit=eval_settings["preview_limit"],
         )
+        if len(preview_paths) == 0:
+            print(
+                "[WARN] Preview generation produced 0 files. "
+                "Check stem overlap and that GT/pred/input directories contain supported map/image formats."
+            )
 
         with open(eval_out_dir / "eval_results.json", "w", encoding="utf-8") as handle:
             json.dump(_jsonify(eval_result), handle, indent=2)
@@ -380,6 +385,7 @@ class Sampler(object):
     def slide_sample(self, inputs, crop_size, stride, mask=None):
         h_stride, w_stride = stride
         h_crop, w_crop = crop_size
+        model_h, model_w = self.cfg.model.image_size
         batch_size, _, h_img, w_img = inputs.size()
         out_channels = 1
         h_grids = max(h_img - h_crop + h_stride - 1, 0) // h_stride + 1
@@ -396,13 +402,29 @@ class Sampler(object):
                 y1 = max(y2 - h_crop, 0)
                 x1 = max(x2 - w_crop, 0)
                 crop_img = inputs[:, :, y1:y2, x1:x2]
+                crop_h = int(y2 - y1)
+                crop_w = int(x2 - x1)
+
+                if crop_h != model_h or crop_w != model_w:
+                    model_input = F.interpolate(crop_img, size=(model_h, model_w), mode="bilinear", align_corners=True)
+                else:
+                    model_input = crop_img
 
                 if isinstance(self.model, nn.parallel.DistributedDataParallel):
-                    crop_seg_logit = self.model.module.sample(batch_size=1, cond=crop_img, mask=mask)
+                    crop_seg_logit = self.model.module.sample(
+                        batch_size=model_input.shape[0], cond=model_input, mask=mask
+                    )
                 elif isinstance(self.model, nn.Module):
-                    crop_seg_logit = self.model.sample(batch_size=1, cond=crop_img, mask=mask)
+                    crop_seg_logit = self.model.sample(
+                        batch_size=model_input.shape[0], cond=model_input, mask=mask
+                    )
                 else:
                     raise NotImplementedError
+
+                if crop_h != model_h or crop_w != model_w:
+                    crop_seg_logit = F.interpolate(
+                        crop_seg_logit, size=(crop_h, crop_w), mode="bilinear", align_corners=True
+                    )
 
                 preds += F.pad(
                     crop_seg_logit,

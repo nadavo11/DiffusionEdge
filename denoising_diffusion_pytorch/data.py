@@ -25,12 +25,112 @@ def get_imgs_list(imgs_dir):
     return [os.path.join(imgs_dir, f) for f in imgs_list if f.endswith('.jpg') or f.endswith('.JPG')or f.endswith('.png') or f.endswith('.pgm') or f.endswith('.ppm')]
 
 
-def fit_img_postfix(img_path):
-    if not os.path.exists(img_path) and img_path.endswith(".jpg"):
-        img_path = img_path[:-4] + ".png"
-    if not os.path.exists(img_path) and img_path.endswith(".png"):
-        img_path = img_path[:-4] + ".jpg"
+def fit_img_postfix(img_path, allow_mat=False):
+    stem, ext = os.path.splitext(img_path)
+    ext = ext.lower()
+
+    candidates = [ext]
+    if ext in {".jpg", ".jpeg"}:
+        candidates.extend([".png", ".bmp", ".pgm", ".ppm"])
+    elif ext == ".png":
+        candidates.extend([".jpg", ".jpeg", ".bmp", ".pgm", ".ppm"])
+    else:
+        candidates.extend([".jpg", ".jpeg", ".png", ".bmp", ".pgm", ".ppm"])
+
+    if allow_mat:
+        candidates.append(".mat")
+
+    seen = set()
+    for candidate_ext in candidates:
+        if candidate_ext in seen:
+            continue
+        seen.add(candidate_ext)
+        candidate_path = stem + candidate_ext
+        if os.path.exists(candidate_path):
+            return candidate_path
     return img_path
+
+
+def _collect_numeric_arrays_from_mat(item, target_field="Boundaries"):
+    arrays = []
+
+    if isinstance(item, np.void):
+        field_names = item.dtype.names or ()
+        if target_field in field_names:
+            return _collect_numeric_arrays_from_mat(item[target_field], target_field=target_field)
+        for field in field_names:
+            arrays.extend(_collect_numeric_arrays_from_mat(item[field], target_field=target_field))
+        return arrays
+
+    if isinstance(item, np.ndarray):
+        if item.dtype.names is not None:
+            if target_field in item.dtype.names:
+                return _collect_numeric_arrays_from_mat(item[target_field], target_field=target_field)
+            for field in item.dtype.names:
+                arrays.extend(_collect_numeric_arrays_from_mat(item[field], target_field=target_field))
+            return arrays
+
+        if item.dtype.kind == "O":
+            for elem in item.flat:
+                arrays.extend(_collect_numeric_arrays_from_mat(elem, target_field=target_field))
+            return arrays
+
+        if item.dtype.kind in "uifb":
+            arrays.append(np.asarray(item, dtype=np.float32))
+            return arrays
+
+    return arrays
+
+
+def _load_mat_edge01(path):
+    try:
+        import scipy.io as scipy_io
+    except Exception as exc:
+        raise ImportError(f"Reading MATLAB GT requires scipy for file: {path}") from exc
+
+    mat = scipy_io.loadmat(str(path))
+    keys = [key for key in mat.keys() if not key.startswith("__")]
+    if not keys:
+        raise ValueError(f"No valid keys found in MAT file: {path}")
+
+    root = mat["groundTruth"] if "groundTruth" in mat else max((mat[k] for k in keys), key=lambda value: value.size)
+    arrays = _collect_numeric_arrays_from_mat(root, target_field="Boundaries")
+    if not arrays:
+        for key in keys:
+            arrays.extend(_collect_numeric_arrays_from_mat(mat[key], target_field="Boundaries"))
+
+    processed = []
+    for array in arrays:
+        value = np.asarray(array, dtype=np.float32)
+        while value.ndim > 2 and value.shape[0] == 1:
+            value = value[0]
+        while value.ndim > 2 and value.shape[-1] == 1:
+            value = value[..., 0]
+        if value.ndim == 3 and value.shape[-1] == 3:
+            value = 0.299 * value[..., 0] + 0.587 * value[..., 1] + 0.114 * value[..., 2]
+        if value.ndim == 2:
+            processed.append(value)
+
+    if not processed:
+        raise ValueError(f"Could not extract 2D edge arrays from MAT file: {path}")
+
+    ref_shape = processed[0].shape
+    same_shape = [arr for arr in processed if arr.shape == ref_shape]
+    if not same_shape:
+        raise ValueError(f"No shape-consistent edge arrays in MAT file: {path}")
+
+    if len(same_shape) == 1:
+        data = same_shape[0]
+    else:
+        data = np.mean(np.stack(same_shape, axis=0), axis=0)
+
+    if not np.isfinite(data).all():
+        raise ValueError(f"MAT GT contains NaN/Inf: {path}")
+
+    if data.max() > 1.0:
+        data = data / 255.0
+    data = np.clip(data, 0.0, 1.0)
+    return data.astype(np.float32)
 
 
 class AdaptEdgeDataset(data.Dataset):
@@ -141,7 +241,7 @@ class AdaptEdgeDataset(data.Dataset):
             for file_name_ext in os.listdir(image_directories):
                 file_name = os.path.basename(file_name_ext)
                 image_path = fit_img_postfix(os.path.join(images_path, directory_name, file_name))
-                lb_path = fit_img_postfix(os.path.join(labels_path, directory_name, file_name))
+                lb_path = fit_img_postfix(os.path.join(labels_path, directory_name, file_name), allow_mat=True)
                 samples.append((image_path, lb_path))
         return samples
 
@@ -189,6 +289,7 @@ class EdgeDataset(data.Dataset):
         self.image_size = image_size
         self.split = split
         self.strict_split = bool(cfg.get('strict_split', False)) if isinstance(cfg, dict) else False
+        self.cache_mat_as_png = bool(cfg.get('cache_mat_as_png', True)) if isinstance(cfg, dict) else True
 
         # self.edge_paths = [p for ext in exts for p in self.edge_folder.rglob(f'*.{ext}')]
         # self.img_paths = [(self.img_folder / item.parent.name / f'{item.stem}.jpg') for item in self.edge_paths]
@@ -244,8 +345,28 @@ class EdgeDataset(data.Dataset):
         return img, (raw_width, raw_height)
 
     def read_lb(self, lb_path):
-        lb_data = Image.open(lb_path).convert('L')
-        lb = np.array(lb_data).astype(np.float32)
+        suffix = os.path.splitext(lb_path)[1].lower()
+        if suffix == ".mat":
+            lb_path_obj = Path(lb_path)
+            cache_png_path = lb_path_obj.with_suffix(".png")
+
+            if cache_png_path.is_file():
+                lb_data = Image.open(str(cache_png_path)).convert('L')
+                lb = np.array(lb_data).astype(np.float32)
+            else:
+                lb = _load_mat_edge01(lb_path) * 255.0
+                if self.cache_mat_as_png:
+                    try:
+                        cache_png_path.parent.mkdir(parents=True, exist_ok=True)
+                        tmp_path = cache_png_path.with_name(f"{cache_png_path.name}.tmp.{os.getpid()}")
+                        Image.fromarray(lb.astype(np.uint8)).save(str(tmp_path))
+                        os.replace(str(tmp_path), str(cache_png_path))
+                    except Exception:
+                        # Best-effort cache write; training can continue from in-memory MAT decode.
+                        pass
+        else:
+            lb_data = Image.open(lb_path).convert('L')
+            lb = np.array(lb_data).astype(np.float32)
         # width, height = lb_data.size
         # width = int(width / 32) * 32
         # height = int(height / 32) * 32
@@ -264,7 +385,7 @@ class EdgeDataset(data.Dataset):
         #     lb[np.logical_and(lb > 0, lb < threshold)] = 2
         # else:
         #     lb[np.logical_and(lb > 0, lb < threshold)] /= 255.
-
+        lb[lb < threshold] = 0
         lb[lb >= threshold] = 255
         lb = Image.fromarray(lb.astype(np.uint8))
         return lb
@@ -324,7 +445,7 @@ class EdgeDataset(data.Dataset):
                 for file_name_ext in sorted(os.listdir(image_dir)):
                     file_name = os.path.basename(file_name_ext)
                     image_path = fit_img_postfix(os.path.join(image_dir, file_name))
-                    lb_path = fit_img_postfix(os.path.join(label_dir, file_name))
+                    lb_path = fit_img_postfix(os.path.join(label_dir, file_name), allow_mat=True)
                     if os.path.splitext(image_path)[1].lower() not in valid_exts:
                         continue
                     if os.path.isfile(image_path) and os.path.isfile(lb_path):
@@ -333,7 +454,7 @@ class EdgeDataset(data.Dataset):
             for file_name_ext in entries:
                 file_name = os.path.basename(file_name_ext)
                 image_path = fit_img_postfix(os.path.join(images_path, file_name))
-                lb_path = fit_img_postfix(os.path.join(labels_path, file_name))
+                lb_path = fit_img_postfix(os.path.join(labels_path, file_name), allow_mat=True)
                 if os.path.splitext(image_path)[1].lower() not in valid_exts:
                     continue
                 if os.path.isfile(image_path) and os.path.isfile(lb_path):

@@ -43,7 +43,7 @@ def make_previews(
     stems: Optional[Sequence[str]] = None,
     limit: Optional[int] = None,
     img_exts: Iterable[str] = (".png", ".jpg", ".jpeg", ".bmp", ".pgm", ".ppm"),
-    map_exts: Iterable[str] = (".png", ".jpg", ".jpeg", ".bmp", ".pgm", ".ppm", ".npy"),
+    map_exts: Iterable[str] = (".png", ".jpg", ".jpeg", ".bmp", ".pgm", ".ppm", ".npy", ".mat"),
     suffix: str = "_preview",
 ) -> List[str]:
     """Create [Input | GT | Pred | Overlay] preview panels."""
@@ -118,4 +118,3 @@ def make_previews(
             continue
 
     return written
-

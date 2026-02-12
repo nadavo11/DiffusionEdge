@@ -263,42 +263,51 @@ def _resolve_eval_dirs(
     eval_split: str,
     image_dir_override: Optional[str],
     gt_dir_override: Optional[str],
+    strict_split: bool = False,
 ) -> Tuple[Path, Path]:
     if image_dir_override:
         image_dir = Path(image_dir_override)
         if not image_dir.is_dir():
             raise FileNotFoundError(f"Eval image_dir does not exist: {image_dir}")
     else:
-        image_candidates = [
-            data_root / "image" / eval_split,
-            data_root / "images" / eval_split,
-            data_root / "image",
-            data_root / "images",
-        ]
+        if strict_split:
+            image_candidates = [
+                data_root / "image" / eval_split,
+                data_root / "images" / eval_split,
+            ]
+        else:
+            image_candidates = [
+                data_root / "image" / eval_split,
+                data_root / "images" / eval_split,
+                data_root / "image",
+                data_root / "images",
+            ]
         image_dir = next((path for path in image_candidates if path.is_dir()), None)
         if image_dir is None:
-            raise FileNotFoundError(
-                f"Could not resolve eval image directory under {data_root}. "
-                f"Expected image/<split>, images/<split>, image, or images."
-            )
+            expected = "image/<split> or images/<split>" if strict_split else "image/<split>, images/<split>, image, or images"
+            raise FileNotFoundError(f"Could not resolve eval image directory under {data_root}. Expected {expected}.")
 
     if gt_dir_override:
         gt_dir = Path(gt_dir_override)
         if not gt_dir.is_dir():
             raise FileNotFoundError(f"Eval gt_dir does not exist: {gt_dir}")
     else:
-        gt_candidates = [
-            data_root / "edge" / eval_split,
-            data_root / "edges" / eval_split,
-            data_root / "edge",
-            data_root / "edges",
-        ]
+        if strict_split:
+            gt_candidates = [
+                data_root / "edge" / eval_split,
+                data_root / "edges" / eval_split,
+            ]
+        else:
+            gt_candidates = [
+                data_root / "edge" / eval_split,
+                data_root / "edges" / eval_split,
+                data_root / "edge",
+                data_root / "edges",
+            ]
         gt_dir = next((path for path in gt_candidates if path.is_dir()), None)
         if gt_dir is None:
-            raise FileNotFoundError(
-                f"Could not resolve eval GT directory under {data_root}. "
-                f"Expected edge/<split>, edges/<split>, edge, or edges."
-            )
+            expected = "edge/<split> or edges/<split>" if strict_split else "edge/<split>, edges/<split>, edge, or edges"
+            raise FileNotFoundError(f"Could not resolve eval GT directory under {data_root}. Expected {expected}.")
 
     return image_dir, gt_dir
 
@@ -313,6 +322,7 @@ def _build_eval_target(
 ) -> Dict[str, Any]:
     data_root = Path(target_cfg.get("data_root", default_data_root))
     eval_split = str(target_cfg.get("split", default_split))
+    strict_split = bool(target_cfg.get("strict_split", False))
     eval_batch_size = int(target_cfg.get("batch_size", 1))
     eval_workers = int(target_cfg.get("num_workers", default_workers))
     eval_image_override = target_cfg.get("image_dir")
@@ -323,6 +333,7 @@ def _build_eval_target(
         eval_split=eval_split,
         image_dir_override=eval_image_override,
         gt_dir_override=eval_gt_override,
+        strict_split=strict_split,
     )
 
     eval_dataset = EdgeDatasetTest(
@@ -353,6 +364,7 @@ def _build_eval_target(
         "preview_limit": int(target_cfg.get("preview_limit", 12)),
         "select_best_metric": str(target_cfg.get("select_best_metric", "generic/AP")),
         "dataset_size": len(eval_dataset),
+        "strict_split": strict_split,
     }
 
 
@@ -497,6 +509,7 @@ def main(args):
         cfg=cfg,
         resume_milestone=train_cfg.resume_milestone,
         train_wd=train_cfg.get("weight_decay", 1e-4),
+        checkpoint_folder=train_cfg.get("checkpoint_folder", None),
         eval_targets=eval_targets,
         eval_cfg=eval_cfg,
     )
@@ -522,6 +535,7 @@ class Trainer(object):
         split_batches=True,
         log_freq=20,
         resume_milestone=0,
+        checkpoint_folder=None,
         cfg={},
         eval_targets: Optional[List[Dict[str, Any]]] = None,
         eval_cfg: Optional[Dict[str, Any]] = None,
@@ -550,6 +564,8 @@ class Trainer(object):
         self.image_size = model.image_size
 
         self.best_loss = float("inf")
+        self.results_folder = Path(results_folder)
+        self.checkpoint_folder = Path(checkpoint_folder) if checkpoint_folder else self.results_folder
         self.eval_cfg = eval_cfg or {}
         self.eval_targets = eval_targets or []
         self.eval_enabled = bool(self.eval_targets)
@@ -588,8 +604,8 @@ class Trainer(object):
         self.lr_scheduler = torch.optim.lr_scheduler.LambdaLR(self.opt, lr_lambda=lr_lambda)
 
         if self.accelerator.is_main_process:
-            self.results_folder = Path(results_folder)
             self.results_folder.mkdir(exist_ok=True, parents=True)
+            self.checkpoint_folder.mkdir(exist_ok=True, parents=True)
             self.eval_output_root = self.results_folder / "eval"
             self.eval_output_root.mkdir(exist_ok=True, parents=True)
 
@@ -619,10 +635,9 @@ class Trainer(object):
         )
         self.logger = create_logger(root_dir=results_folder)
         self.logger.info(cfg)
-        self.writer = SummaryWriter(results_folder)
-        self.results_folder = Path(results_folder)
+        self.writer = SummaryWriter(str(self.results_folder))
 
-        resume_file = str(self.results_folder / f"model-{resume_milestone}.pt")
+        resume_file = str(self.checkpoint_folder / f"model-{resume_milestone}.pt")
         if os.path.isfile(resume_file):
             self.load(resume_milestone)
 
@@ -631,7 +646,7 @@ class Trainer(object):
             return
 
         filename = f"model-{milestone}.pt"
-        save_path = str(self.results_folder / filename)
+        save_path = str(self.checkpoint_folder / filename)
 
         if self.enable_resume:
             data = {
@@ -659,7 +674,7 @@ class Trainer(object):
         assert self.enable_resume, "resume is available only if self.enable_resume is True !"
 
         filename = f"model-{milestone}.pt"
-        load_path = str(self.results_folder / filename)
+        load_path = str(self.checkpoint_folder / filename)
         data = torch.load(load_path, map_location=lambda storage, loc: storage)
 
         model = self.accelerator.unwrap_model(self.model)
