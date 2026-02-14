@@ -461,6 +461,15 @@ def main(args):
         primary_cfg = dict(eval_cfg)
         rwtd_cfg = _cfg_to_dict(primary_cfg.pop("rwtd", {}))
 
+        # The global select_best_metric may use "<target>/<metric>" format
+        # (e.g. "rwtd/edge/AP"). Strip the target prefix so it doesn't leak
+        # into the val target's per-target config.
+        _sbm = str(primary_cfg.get("select_best_metric", "generic/AP"))
+        _sbm_parts = _sbm.split("/", 1)
+        _known_targets = {"val", "rwtd"}
+        if len(_sbm_parts) == 2 and _sbm_parts[0] in _known_targets:
+            primary_cfg["select_best_metric"] = _sbm_parts[1]
+
         primary_target = _build_eval_target(
             name="val",
             target_cfg=primary_cfg,
