@@ -85,7 +85,7 @@ trainer:
   eval:
     enabled: True
     run_at_step0: True
-    every_steps: 1000
+    every_steps: 200
     split: val
     batch_size: 1
     num_workers: 8
@@ -97,7 +97,7 @@ trainer:
     apply_thinning: True
     nproc: 4
     preview_limit: 12
-    select_best_metric: edge/AP
+    select_best_metric: rwtd/edge/AP
     rwtd:
       enabled: True
       log_prefix: rwtd
@@ -113,4 +113,4 @@ trainer:
       apply_thinning: True
       nproc: 4
       preview_limit: 16
-      select_best_metric: edge/AP
+      select_best_metric: rwtd/edge/AP

@@ -816,13 +816,18 @@ class Trainer(object):
 
     @staticmethod
     def _select_eval_metric(flat_metrics: Dict[str, float], metric_key: str, log_prefix: str) -> Optional[float]:
+        # 1. Try exact match.
         key = metric_key.strip()
-        if key.startswith(f"{log_prefix}/"):
-            key = key[len(log_prefix) + 1 :]
-        if "/" in key:
-            key = key.split("/", 1)[1]
         if key in flat_metrics:
             return float(flat_metrics[key])
+
+        # 2. Try stripping log prefix (e.g. "val/edge/AP" -> "edge/AP").
+        prefix = f"{log_prefix}/"
+        if key.startswith(prefix):
+            key_without_prefix = key[len(prefix) :]
+            if key_without_prefix in flat_metrics:
+                return float(flat_metrics[key_without_prefix])
+
         return None
 
     def _run_evaluation(self, step: int, reason: str, target: Dict[str, Any]) -> Dict[str, float]:
