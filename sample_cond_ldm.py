@@ -35,6 +35,13 @@ def parse_args():
     parser.add_argument("--eval_mode", type=str, choices=["binary", "edge"], default=None)
     parser.add_argument("--eval_thresholds", type=str, default=None)
     parser.add_argument("--eval_max_dist", type=float, default=None)
+    parser.add_argument("--eval_protocol", type=str, choices=["legacy", "bsds"], default=None)
+    parser.add_argument("--eval_ap_mode", type=str, choices=["bsds_interp", "trapz", "voc_interp"], default=None)
+    parser.add_argument("--eval_edge_keys_mode", type=str, choices=["full", "legacy_minimal"], default=None)
+    generic_group = parser.add_mutually_exclusive_group()
+    generic_group.add_argument("--eval_include_generic_metrics", dest="eval_include_generic_metrics", action="store_true")
+    generic_group.add_argument("--eval_skip_generic_metrics", dest="eval_include_generic_metrics", action="store_false")
+    parser.set_defaults(eval_include_generic_metrics=None)
     parser.add_argument("--eval_apply_nms", action="store_true")
     parser.add_argument("--eval_apply_thinning", action="store_true")
     parser.add_argument("--eval_nproc", type=int, default=None)
@@ -92,6 +99,10 @@ def _resolve_eval_settings(args, cfg: CfgNode, pred_dir: Path) -> Optional[Dict[
             args.eval_mode,
             args.eval_thresholds,
             args.eval_max_dist,
+            args.eval_protocol,
+            args.eval_ap_mode,
+            args.eval_edge_keys_mode,
+            args.eval_include_generic_metrics,
             args.eval_nproc,
             args.eval_preview_limit,
             args.eval_out_dir,
@@ -112,6 +123,19 @@ def _resolve_eval_settings(args, cfg: CfgNode, pred_dir: Path) -> Optional[Dict[
     eval_mode = args.eval_mode or sampler_cfg.get("eval_mode", "edge")
     eval_thresholds = args.eval_thresholds if args.eval_thresholds is not None else sampler_cfg.get("eval_thresholds", 99)
     eval_max_dist = float(args.eval_max_dist if args.eval_max_dist is not None else sampler_cfg.get("eval_max_dist", 0.0075))
+    eval_protocol = args.eval_protocol if args.eval_protocol is not None else sampler_cfg.get("eval_protocol", None)
+    eval_ap_mode = args.eval_ap_mode if args.eval_ap_mode is not None else sampler_cfg.get("eval_ap_mode", "bsds_interp")
+    default_edge_keys_mode = "legacy_minimal" if eval_mode == "edge" else "full"
+    default_include_generic = eval_mode != "edge"
+    eval_edge_keys_mode = (
+        args.eval_edge_keys_mode
+        if args.eval_edge_keys_mode is not None
+        else sampler_cfg.get("eval_edge_keys_mode", default_edge_keys_mode)
+    )
+    if args.eval_include_generic_metrics is not None:
+        eval_include_generic_metrics = bool(args.eval_include_generic_metrics)
+    else:
+        eval_include_generic_metrics = bool(sampler_cfg.get("eval_include_generic_metrics", default_include_generic))
     eval_apply_nms = bool(args.eval_apply_nms or sampler_cfg.get("eval_apply_nms", False))
     eval_apply_thinning = bool(args.eval_apply_thinning or sampler_cfg.get("eval_apply_thinning", False))
     eval_nproc = int(args.eval_nproc if args.eval_nproc is not None else sampler_cfg.get("eval_nproc", 4))
@@ -133,6 +157,10 @@ def _resolve_eval_settings(args, cfg: CfgNode, pred_dir: Path) -> Optional[Dict[
         "mode": eval_mode,
         "thresholds": eval_thresholds,
         "max_dist": eval_max_dist,
+        "protocol": eval_protocol,
+        "ap_mode": eval_ap_mode,
+        "edge_keys_mode": eval_edge_keys_mode,
+        "include_generic_metrics": eval_include_generic_metrics,
         "apply_nms": eval_apply_nms,
         "apply_thinning": eval_apply_thinning,
         "nproc": eval_nproc,
@@ -245,6 +273,10 @@ def main(args):
             mode=eval_settings["mode"],
             thresholds=eval_settings["thresholds"],
             max_dist=eval_settings["max_dist"],
+            protocol=eval_settings["protocol"],
+            ap_mode=eval_settings["ap_mode"],
+            include_generic_metrics=eval_settings["include_generic_metrics"],
+            edge_keys_mode=eval_settings["edge_keys_mode"],
             apply_nms=eval_settings["apply_nms"],
             apply_thinning=eval_settings["apply_thinning"],
             nproc=eval_settings["nproc"],

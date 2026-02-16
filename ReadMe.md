@@ -365,7 +365,7 @@ The shared evaluator lives in:
 | `trainer.eval.num_batches` | `64` | `int` | Cap eval iterations (`-1` for full set) |
 | `trainer.eval.mode` | `edge` | `str` | `binary` (sklearn) or `edge` (pyEdgeEval + sklearn) |
 | `trainer.eval.preview_limit` | `12` | `int` | Max triplets/previews logged per eval run |
-| `trainer.eval.select_best_metric` | `edge/AP` | `str` | Metric key used for best-eval tracking |
+| `trainer.eval.select_best_metric` | `edge/AP_pr` | `str` | Metric key used for best-eval tracking (legacy aliases like `edge/AP` still accepted) |
 | `trainer.eval.rwtd.enabled` | `False` | `bool` | Enable an additional RWTD eval target in the same step-0/periodic loop |
 | `trainer.eval.rwtd.num_batches` | `8` | `int` | Small RWTD subset size per eval cycle |
 
@@ -419,7 +419,37 @@ The shared evaluator lives in:
 - `train_cond_ldm.py` runs the same validation pipeline at step 0 and at each `trainer.eval.every_steps`.
 - Validation artifacts are written to `trainer.results_folder/eval/val_step_XXXXXXX/{preds,gt,previews}`.
 - `sample_cond_ldm.py` can run standalone evaluation when `sampler.eval_enabled` is true or eval CLI flags are provided.
-- `mode=binary` computes sklearn AP/ROC-AUC; `mode=edge` additionally runs pyEdgeEval and saves JSON outputs.
+- `mode=binary` computes pixel-level sklearn metrics (`generic/AP_pixel`, `generic/ROC_AUC_pixel`);
+  `mode=edge` additionally runs pyEdgeEval and reports explicit edge keys
+  (`edge/AP_pr`, `edge/ODS_f1`, `edge/OIS_pooled_f1`, `edge/OIS_macro_meanF1`) with legacy aliases retained.
+- To avoid extra CPU/log clutter in edge-only workflows, set:
+  - `include_generic_metrics: false`
+  - `edge_keys_mode: legacy_minimal`
+  This keeps only: `edge/AP`, `edge/ODS_*`, `edge/OIS_*`.
+
+### 8.4 BSDS parity check (Python vs pdollar/edges)
+- One-time parity harness:
+  - `tools/bsds_parity_check.py`
+  - reference MATLAB/Octave runner: `tools/bsds_ref/run_bsds_ref.m`
+- Default protocol settings are fixed for parity:
+  - `thresholds=99`, `max_dist=0.0075`, `apply_thinning=True`, `apply_nms=False`
+- Example:
+```bash
+python tools/bsds_parity_check.py \
+  --gt_dir ./BSDS/edge/val \
+  --pred_dir ./out \
+  --edges_toolbox_path ./third_party/pdollar_edges \
+  --subset_n 20 \
+  --seed 0 \
+  --out_dir ./out/bsds_parity
+```
+- Cluster usage:
+  - load your MATLAB/Octave module, then pass the binary explicitly (for example `--matlab /usr/bin/octave`).
+- Outputs:
+  - `./out/bsds_parity/bsds_parity_report.json`
+  - `./out/bsds_parity/bsds_parity_report.md`
+  - plus `subset_ids.txt`, `python_metrics.json`, `ref_metrics.json`, and reference stdout/stderr logs.
+- If Octave/MATLAB or `correspondPixels` mex is missing, the script fails loudly with instructions.
 
 ## 9. Troubleshooting
 

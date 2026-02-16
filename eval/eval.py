@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import os
 import os.path as osp
+import warnings
 from typing import Any, Dict, List, Optional, Sequence
 
 import cv2
@@ -24,6 +25,20 @@ from sklearn.metrics import (
 )
 
 ALLOWED_EXTS: Sequence[str] = (".png", ".jpg", ".jpeg", ".bmp", ".pgm", ".ppm", ".npy", ".mat")
+EDGE_PROTOCOL_DEFAULTS: Dict[str, Dict[str, Any]] = {
+    "legacy": {
+        "max_dist": 0.0075,
+        "apply_thinning": False,
+        "apply_nms": False,
+    },
+    "bsds": {
+        "max_dist": 0.0075,
+        "apply_thinning": True,
+        "apply_nms": False,
+    },
+}
+EDGE_AP_MODES = {"bsds_interp", "trapz", "voc_interp"}
+EDGE_KEYS_MODES = {"full", "legacy_minimal"}
 
 
 def _collect_numeric_arrays_from_mat(item: Any, target_field: str = "Boundaries") -> List[np.ndarray]:
@@ -97,7 +112,9 @@ def _load_mat_gray01(path: str) -> np.ndarray:
     if len(same_shape) == 1:
         data = same_shape[0]
     else:
-        data = np.mean(np.stack(same_shape, axis=0), axis=0)
+        # Preserve all annotator boundaries when possible; for single-map loading
+        # use a non-averaging collapse to avoid changing edge support via smoothing.
+        data = np.max(np.stack(same_shape, axis=0), axis=0)
 
     if not np.isfinite(data).all():
         raise ValueError(f"Found NaN/Inf in {path}")
@@ -105,6 +122,51 @@ def _load_mat_gray01(path: str) -> np.ndarray:
     if float(data.max()) > 1.0 + 1e-6:
         data = data / 255.0
     return np.clip(data, 0.0, 1.0).astype(np.float32)
+
+
+def _load_mat_boundaries01_list(path: str) -> List[np.ndarray]:
+    """Load MATLAB boundary annotations as a list of per-annotator maps in [0, 1]."""
+    try:
+        import scipy.io as scipy_io
+    except Exception as exc:
+        raise ImportError(f"Reading MATLAB files requires scipy: {path}") from exc
+
+    mat = scipy_io.loadmat(path)
+    keys = [key for key in mat.keys() if not key.startswith("__")]
+    if not keys:
+        raise ValueError(f"No valid keys found in MAT file: {path}")
+
+    root = mat["groundTruth"] if "groundTruth" in mat else max((mat[k] for k in keys), key=lambda value: value.size)
+    arrays = _collect_numeric_arrays_from_mat(root, target_field="Boundaries")
+    if not arrays:
+        for key in keys:
+            arrays.extend(_collect_numeric_arrays_from_mat(mat[key], target_field="Boundaries"))
+
+    processed: List[np.ndarray] = []
+    for array in arrays:
+        value = np.asarray(array, dtype=np.float32)
+        while value.ndim > 2 and value.shape[0] == 1:
+            value = value[0]
+        while value.ndim > 2 and value.shape[-1] == 1:
+            value = value[..., 0]
+        if value.ndim == 3 and value.shape[-1] == 3:
+            value = 0.299 * value[..., 0] + 0.587 * value[..., 1] + 0.114 * value[..., 2]
+        if value.ndim == 2:
+            if not np.isfinite(value).all():
+                raise ValueError(f"Found NaN/Inf in {path}")
+            if float(value.max()) > 1.0 + 1e-6:
+                value = value / 255.0
+            processed.append(np.clip(value, 0.0, 1.0).astype(np.float32))
+
+    if not processed:
+        raise ValueError(f"Could not extract per-annotator boundary maps from MAT file: {path}")
+
+    ref_shape = processed[0].shape
+    same_shape = [arr for arr in processed if arr.shape == ref_shape]
+    if not same_shape:
+        raise ValueError(f"No shape-consistent boundary maps in MAT file: {path}")
+
+    return same_shape
 
 
 def list_stems(dir_path: str) -> List[str]:
@@ -193,6 +255,97 @@ def _normalize_thresholds(thresholds: Any) -> Any:
     )
 
 
+def _load_gt_list01(path: str) -> List[np.ndarray]:
+    """Load GT as list-of-maps in [0, 1] for unified edge evaluation."""
+    ext = osp.splitext(path)[1].lower()
+    if ext == ".mat":
+        return _load_mat_boundaries01_list(path)
+    return [load_gray01(path)]
+
+
+def _compute_ap_from_pr(recall: np.ndarray, precision: np.ndarray, ap_mode: str) -> float:
+    """Compute AP from pooled PR points using an explicit interpolation/integration mode."""
+    if ap_mode not in EDGE_AP_MODES:
+        raise ValueError(f"Unsupported ap_mode '{ap_mode}'. Expected one of {sorted(EDGE_AP_MODES)}.")
+
+    rec = np.asarray(recall, dtype=np.float64).reshape(-1)
+    prec = np.asarray(precision, dtype=np.float64).reshape(-1)
+    if rec.size == 0:
+        return 0.0
+    if rec.size != prec.size:
+        raise ValueError(f"recall/precision size mismatch: {rec.size} vs {prec.size}")
+
+    order = np.argsort(rec)
+    rec = rec[order]
+    prec = prec[order]
+
+    if ap_mode == "trapz":
+        rec_unique = np.unique(rec)
+        if rec_unique.size < 2:
+            return 0.0
+        prec_unique = np.array([np.max(prec[rec == value]) for value in rec_unique], dtype=np.float64)
+        integrate = getattr(np, "trapezoid", np.trapz)
+        return float(integrate(prec_unique, rec_unique))
+
+    if ap_mode == "voc_interp":
+        # VOC 2007 11-point interpolation.
+        ap = 0.0
+        for r in np.linspace(0.0, 1.0, 11):
+            mask = rec >= r
+            p = float(np.max(prec[mask])) if np.any(mask) else 0.0
+            ap += p
+        return ap / 11.0
+
+    # BSDS/PASCAL-style 101-point interpolation.
+    ap = 0.0
+    for r in np.linspace(0.0, 1.0, 101):
+        mask = rec >= r
+        p = float(np.max(prec[mask])) if np.any(mask) else 0.0
+        ap += p
+    return ap / 101.0
+
+
+def _compute_ois_macro_mean_f1(sample_metrics: Sequence[Dict[str, Any]]) -> float:
+    """Macro OIS: arithmetic mean of per-image best F1 values."""
+    if not sample_metrics:
+        return 0.0
+    f1_values = [float(item["f1"]) for item in sample_metrics if "f1" in item]
+    if not f1_values:
+        return 0.0
+    return float(np.mean(np.asarray(f1_values, dtype=np.float64)))
+
+
+def _resolve_edge_protocol(
+    protocol: Optional[str],
+    max_dist: Optional[float],
+    apply_thinning: Optional[bool],
+    apply_nms: Optional[bool],
+) -> Dict[str, Any]:
+    resolved_protocol = protocol
+    if resolved_protocol is None:
+        if max_dist is None and apply_thinning is None and apply_nms is None:
+            warnings.warn(
+                "mode='edge' called without explicit protocol. Using protocol='legacy'. "
+                "Set protocol='bsds' or protocol='legacy' explicitly to avoid ambiguity.",
+                RuntimeWarning,
+            )
+        resolved_protocol = "legacy"
+
+    if resolved_protocol not in EDGE_PROTOCOL_DEFAULTS:
+        raise ValueError(
+            f"Unsupported protocol '{resolved_protocol}'. Expected one of {sorted(EDGE_PROTOCOL_DEFAULTS.keys())}."
+        )
+
+    defaults = EDGE_PROTOCOL_DEFAULTS[resolved_protocol]
+    out = {
+        "protocol": resolved_protocol,
+        "max_dist": float(defaults["max_dist"] if max_dist is None else max_dist),
+        "apply_thinning": bool(defaults["apply_thinning"] if apply_thinning is None else apply_thinning),
+        "apply_nms": bool(defaults["apply_nms"] if apply_nms is None else apply_nms),
+    }
+    return out
+
+
 def _matched_stems(gt_dir: str, pred_dir: str) -> List[str]:
     gt_stems = set(list_stems(gt_dir))
     pred_stems = set(list_stems(pred_dir))
@@ -226,32 +379,64 @@ def _compute_generic_metrics(gt_dir: str, pred_dir: str) -> Dict[str, Any]:
     precision, recall, pr_thresholds = precision_recall_curve(y_true, y_score)
     fpr, tpr, roc_thresholds = roc_curve(y_true, y_score)
 
+    ap_pixel = float(average_precision_score(y_true, y_score))
+    roc_auc_pixel = float(roc_auc_score(y_true, y_score))
+    n_pixels = int(y_true.size)
+
     return {
-        "AP": float(average_precision_score(y_true, y_score)),
-        "ROC_AUC": float(roc_auc_score(y_true, y_score)),
+        "AP_pixel": ap_pixel,
+        "ROC_AUC_pixel": roc_auc_pixel,
+        "N_pixels": n_pixels,
+        # Legacy aliases.
+        "AP": ap_pixel,
+        "ROC_AUC": roc_auc_pixel,
+        "N": n_pixels,
         "PR_precision": precision,
         "PR_recall": recall,
         "PR_thresholds": pr_thresholds,
         "ROC_FPR": fpr,
         "ROC_TPR": tpr,
         "ROC_thresholds": roc_thresholds,
-        "N": int(y_true.size),
     }
 
 
 def _edge_eval_single(kwargs: Dict[str, Any]):
     """Top-level pyEdgeEval worker callback (must be picklable)."""
-    from pyEdgeEval.common.binary_label.evaluate_boundaries import evaluate_boundaries_threshold
+    from pyEdgeEval.common.binary_label.evaluate_boundaries import (
+        evaluate_boundaries_threshold,
+        evaluate_boundaries_threshold_multiple_gts,
+    )
     from pyEdgeEval.common.utils import check_thresholds
 
     eval_thresholds = check_thresholds(kwargs["thresholds"])
-    gt = load_gray01(kwargs["gt_path"])
     pred = load_gray01(kwargs["pred_path"])
-    gt_bin = (gt > 0.5).astype(np.uint8)
+    gt_list = _load_gt_list01(kwargs["gt_path"])
+    if not gt_list:
+        raise ValueError(f"No GT maps extracted from {kwargs['gt_path']}")
+
+    gt_bin_list: List[np.ndarray] = []
+    for gt in gt_list:
+        if gt.shape != pred.shape:
+            raise ValueError(
+                f"Shape mismatch for '{kwargs['name']}': pred={pred.shape}, gt={gt.shape} "
+                f"from {kwargs['gt_path']}"
+            )
+        gt_bin_list.append((gt > 0.5).astype(np.uint8))
+
+    if len(gt_bin_list) > 1:
+        return evaluate_boundaries_threshold_multiple_gts(
+            thresholds=eval_thresholds,
+            pred=pred,
+            gts=gt_bin_list,
+            max_dist=kwargs["max_dist"],
+            apply_thinning=kwargs["apply_thinning"],
+            apply_nms=kwargs["apply_nms"],
+        )
+
     return evaluate_boundaries_threshold(
         thresholds=eval_thresholds,
         pred=pred,
-        gt=gt_bin,
+        gt=gt_bin_list[0],
         max_dist=kwargs["max_dist"],
         apply_thinning=kwargs["apply_thinning"],
         apply_nms=kwargs["apply_nms"],
@@ -265,6 +450,9 @@ def _compute_edge_metrics(
     max_dist: float,
     apply_thinning: bool,
     apply_nms: bool,
+    ap_mode: str,
+    protocol: str,
+    edge_keys_mode: str,
     nproc: int,
     save_dir: Optional[str],
 ) -> Dict[str, Any]:
@@ -300,24 +488,81 @@ def _compute_edge_metrics(
         nproc=nproc,
     )
 
+    if edge_keys_mode not in EDGE_KEYS_MODES:
+        raise ValueError(
+            f"Unsupported edge_keys_mode '{edge_keys_mode}'. Expected one of {sorted(EDGE_KEYS_MODES)}."
+        )
+
+    if ap_mode == "bsds_interp" and edge_keys_mode == "legacy_minimal" and "AP" in overall_metrics:
+        # In minimal legacy mode, reuse pyEdgeEval AP directly to avoid duplicate integration work.
+        ap_value = float(overall_metrics["AP"])
+    else:
+        rec_overall = np.array([float(item["recall"]) for item in threshold_metrics], dtype=np.float64)
+        prec_overall = np.array([float(item["precision"]) for item in threshold_metrics], dtype=np.float64)
+        ap_value = _compute_ap_from_pr(rec_overall, prec_overall, ap_mode=ap_mode)
+
+    auc_pr = float(overall_metrics.get("AUC", 0.0))
+    ods_threshold = float(overall_metrics["ODS_threshold"])
+    ods_recall = float(overall_metrics["ODS_recall"])
+    ods_precision = float(overall_metrics["ODS_precision"])
+    ods_f1 = float(overall_metrics["ODS_f1"])
+    ois_pooled_recall = float(overall_metrics["OIS_recall"])
+    ois_pooled_precision = float(overall_metrics["OIS_precision"])
+    ois_pooled_f1 = float(overall_metrics["OIS_f1"])
+
+    if edge_keys_mode == "legacy_minimal":
+        edge_metrics = {
+            "AP": float(ap_value),
+            "ODS_threshold": ods_threshold,
+            "ODS_recall": ods_recall,
+            "ODS_precision": ods_precision,
+            "ODS_f1": ods_f1,
+            "OIS_recall": ois_pooled_recall,
+            "OIS_precision": ois_pooled_precision,
+            "OIS_f1": ois_pooled_f1,
+        }
+    else:
+        ois_macro = _compute_ois_macro_mean_f1(sample_metrics)
+        edge_metrics = {
+            # Explicit edge metrics.
+            "ODS_threshold": ods_threshold,
+            "ODS_recall": ods_recall,
+            "ODS_precision": ods_precision,
+            "ODS_f1": ods_f1,
+            "OIS_pooled_recall": ois_pooled_recall,
+            "OIS_pooled_precision": ois_pooled_precision,
+            "OIS_pooled_f1": ois_pooled_f1,
+            "OIS_macro_meanF1": ois_macro,
+            "AUC_pr": auc_pr,
+            "AP_pr": float(ap_value),
+            # Legacy aliases.
+            "OIS_recall": ois_pooled_recall,
+            "OIS_precision": ois_pooled_precision,
+            "OIS_f1": ois_pooled_f1,
+            "AUC": auc_pr,
+            "AP": float(ap_value),
+        }
+
     if save_dir is not None:
         os.makedirs(save_dir, exist_ok=True)
+        overall_to_save = dict(overall_metrics)
+        overall_to_save["AP"] = float(ap_value)
         save_results(
             root=save_dir,
             sample_metrics=sample_metrics,
             threshold_metrics=threshold_metrics,
-            overall_metric=overall_metrics,
+            overall_metric=overall_to_save,
         )
 
-    return overall_metrics
+    return edge_metrics
 
 
 def flatten_metrics(result: Dict[str, Any], prefix: str = "") -> Dict[str, float]:
     """Flatten evaluation output into scalar-only dictionary for logging."""
     out: Dict[str, float] = {}
 
-    generic = result.get("generic_metrics", {})
-    for key in ("AP", "ROC_AUC", "N"):
+    generic = result.get("generic_metrics") or {}
+    for key in ("AP_pixel", "ROC_AUC_pixel", "N_pixels", "AP", "ROC_AUC", "N"):
         value = generic.get(key)
         if value is not None and np.isscalar(value):
             out[f"{prefix}generic/{key}"] = float(value)
@@ -336,9 +581,13 @@ def evaluate_dataset(
     pred_dir: str,
     mode: str = "binary",
     thresholds: Any = 99,
-    max_dist: float = 0.0075,
-    apply_thinning: bool = False,
-    apply_nms: bool = False,
+    max_dist: Optional[float] = None,
+    apply_thinning: Optional[bool] = None,
+    apply_nms: Optional[bool] = None,
+    protocol: Optional[str] = None,
+    ap_mode: str = "bsds_interp",
+    include_generic_metrics: bool = True,
+    edge_keys_mode: str = "full",
     nproc: int = 4,
     save_dir: Optional[str] = None,
 ) -> Dict[str, Any]:
@@ -349,9 +598,13 @@ def evaluate_dataset(
         pred_dir: directory containing prediction maps.
         mode: "binary" for generic metrics only, or "edge" for pyEdgeEval + generic.
         thresholds: threshold setting for edge mode.
-        max_dist: pyEdgeEval matching tolerance.
-        apply_thinning: pyEdgeEval thinning.
-        apply_nms: pyEdgeEval NMS.
+        max_dist: pyEdgeEval matching tolerance (resolved by protocol when None).
+        apply_thinning: pyEdgeEval thinning (resolved by protocol when None).
+        apply_nms: pyEdgeEval NMS (resolved by protocol when None).
+        protocol: edge preprocessing protocol ("legacy" or "bsds"). Used in edge mode.
+        ap_mode: AP computation mode ("bsds_interp", "trapz", "voc_interp").
+        include_generic_metrics: whether to compute/report generic pixel metrics.
+        edge_keys_mode: edge output schema ("full" or "legacy_minimal").
         nproc: pyEdgeEval workers.
         save_dir: optional path for edge-mode JSON outputs.
     """
@@ -361,23 +614,59 @@ def evaluate_dataset(
         raise FileNotFoundError(f"GT directory not found: {gt_dir}")
     if not osp.isdir(pred_dir):
         raise FileNotFoundError(f"Prediction directory not found: {pred_dir}")
+    if mode == "binary" and not include_generic_metrics:
+        raise ValueError("mode='binary' requires include_generic_metrics=True.")
 
-    generic_metrics = _compute_generic_metrics(gt_dir, pred_dir)
+    generic_metrics: Optional[Dict[str, Any]] = None
+    if include_generic_metrics:
+        generic_metrics = _compute_generic_metrics(gt_dir, pred_dir)
+
     edge_metrics: Optional[Dict[str, Any]] = None
+    meta: Dict[str, Any] = {
+        "generic": {
+            "metrics_namespace": "pixel",
+            "enabled": include_generic_metrics,
+        }
+    }
 
     if mode == "edge":
+        if ap_mode not in EDGE_AP_MODES:
+            raise ValueError(f"Unsupported ap_mode '{ap_mode}'. Expected one of {sorted(EDGE_AP_MODES)}.")
+        if edge_keys_mode not in EDGE_KEYS_MODES:
+            raise ValueError(
+                f"Unsupported edge_keys_mode '{edge_keys_mode}'. Expected one of {sorted(EDGE_KEYS_MODES)}."
+            )
+        edge_cfg = _resolve_edge_protocol(
+            protocol=protocol,
+            max_dist=max_dist,
+            apply_thinning=apply_thinning,
+            apply_nms=apply_nms,
+        )
         edge_metrics = _compute_edge_metrics(
             gt_dir=gt_dir,
             pred_dir=pred_dir,
             thresholds=thresholds,
-            max_dist=max_dist,
-            apply_thinning=apply_thinning,
-            apply_nms=apply_nms,
+            max_dist=edge_cfg["max_dist"],
+            apply_thinning=edge_cfg["apply_thinning"],
+            apply_nms=edge_cfg["apply_nms"],
+            ap_mode=ap_mode,
+            protocol=edge_cfg["protocol"],
+            edge_keys_mode=edge_keys_mode,
             nproc=nproc,
             save_dir=save_dir,
         )
+        meta["edge"] = {
+            "protocol": edge_cfg["protocol"],
+            "ap_mode": ap_mode,
+            "edge_keys_mode": edge_keys_mode,
+            "thresholds": thresholds,
+            "max_dist": edge_cfg["max_dist"],
+            "apply_thinning": edge_cfg["apply_thinning"],
+            "apply_nms": edge_cfg["apply_nms"],
+        }
 
     return {
         "edge_metrics": edge_metrics,
         "generic_metrics": generic_metrics,
+        "meta": meta,
     }

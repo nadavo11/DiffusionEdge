@@ -348,6 +348,11 @@ def _build_eval_target(
         num_workers=eval_workers,
     )
 
+    eval_mode = str(target_cfg.get("mode", "edge"))
+    default_select_best_metric = "edge/AP" if eval_mode == "edge" else "generic/AP_pixel"
+    default_include_generic = eval_mode != "edge"
+    default_edge_keys_mode = "legacy_minimal" if eval_mode == "edge" else "full"
+
     return {
         "name": name,
         "log_prefix": str(target_cfg.get("log_prefix", name)),
@@ -355,14 +360,18 @@ def _build_eval_target(
         "image_dir": eval_image_dir,
         "gt_dir": eval_gt_dir,
         "num_batches": int(target_cfg.get("num_batches", -1)),
-        "mode": str(target_cfg.get("mode", "edge")),
+        "mode": eval_mode,
         "thresholds": target_cfg.get("thresholds", 99),
         "max_dist": float(target_cfg.get("max_dist", 0.0075)),
         "apply_nms": bool(target_cfg.get("apply_nms", False)),
         "apply_thinning": bool(target_cfg.get("apply_thinning", False)),
+        "protocol": target_cfg.get("protocol", None),
+        "ap_mode": str(target_cfg.get("ap_mode", "bsds_interp")),
+        "include_generic_metrics": bool(target_cfg.get("include_generic_metrics", default_include_generic)),
+        "edge_keys_mode": str(target_cfg.get("edge_keys_mode", default_edge_keys_mode)),
         "nproc": int(target_cfg.get("nproc", 4)),
         "preview_limit": int(target_cfg.get("preview_limit", 12)),
-        "select_best_metric": str(target_cfg.get("select_best_metric", "generic/AP")),
+        "select_best_metric": str(target_cfg.get("select_best_metric", default_select_best_metric)),
         "dataset_size": len(eval_dataset),
         "strict_split": strict_split,
     }
@@ -464,10 +473,16 @@ def main(args):
         # The global select_best_metric may use "<target>/<metric>" format
         # (e.g. "rwtd/edge/AP"). Strip the target prefix so it doesn't leak
         # into the val target's per-target config.
-        _sbm = str(primary_cfg.get("select_best_metric", "generic/AP"))
+        _rwtd_enabled = bool(rwtd_cfg.get("enabled", False))
+        if _rwtd_enabled:
+            _rwtd_mode = str(rwtd_cfg.get("mode", "edge"))
+            _default_sbm = "rwtd/edge/AP" if _rwtd_mode == "edge" else "rwtd/generic/AP_pixel"
+        else:
+            _default_sbm = "edge/AP" if str(primary_cfg.get("mode", "edge")) == "edge" else "generic/AP_pixel"
+        _sbm = str(primary_cfg.get("select_best_metric", _default_sbm))
         _sbm_parts = _sbm.split("/", 1)
         _known_targets = {"val", "rwtd"}
-        if len(_sbm_parts) == 2 and _sbm_parts[0] in _known_targets:
+        if len(_sbm_parts) == 2 and _sbm_parts[0].lower() in _known_targets:
             primary_cfg["select_best_metric"] = _sbm_parts[1]
 
         primary_target = _build_eval_target(
@@ -607,15 +622,29 @@ class Trainer(object):
             # e.g. "rwtd/edge/AP" → target="rwtd", metric="edge/AP".
             # If the first segment is not a known target name, treat the whole
             # string as a metric key on the default "val" target.
-            global_sbm = str(self.eval_cfg.get("select_best_metric", "generic/AP"))
+            _target_mode_by_name: Dict[str, str] = {}
+            for _target in self.eval_targets:
+                _name = str(_target.get("name", ""))
+                if _name:
+                    _target_mode_by_name[_name.lower()] = str(_target.get("mode", "edge"))
+
+            if "rwtd" in _target_mode_by_name:
+                _rwtd_mode = _target_mode_by_name["rwtd"]
+                _default_sbm = "rwtd/edge/AP" if _rwtd_mode == "edge" else "rwtd/generic/AP_pixel"
+            else:
+                _val_target_mode = _target_mode_by_name.get("val", "edge")
+                _default_sbm = "edge/AP" if _val_target_mode == "edge" else "generic/AP_pixel"
+            global_sbm = str(self.eval_cfg.get("select_best_metric", _default_sbm))
             target_names = {str(t.get("name", "unknown")) for t in self.eval_targets}
+            target_names_by_lower = {name.lower(): name for name in target_names}
             parts = global_sbm.split("/", 1)
-            if len(parts) == 2 and parts[0] in target_names:
+            parts_target_lower = parts[0].lower() if len(parts) == 2 else ""
+            if len(parts) == 2 and parts_target_lower in target_names_by_lower:
                 # e.g. "rwtd/edge/AP" → target="rwtd", remaining could be "edge/AP"
-                self.best_ckpt_target = parts[0]
+                self.best_ckpt_target = target_names_by_lower[parts_target_lower]
                 self.best_ckpt_metric = parts[1]
             else:
-                # e.g. "edge/AP" or "generic/AP" → default target is "val"
+                # e.g. "edge/AP" or "generic/AP_pixel" → default target is "val"
                 self.best_ckpt_target = "val"
                 self.best_ckpt_metric = global_sbm
             print(
@@ -816,17 +845,31 @@ class Trainer(object):
 
     @staticmethod
     def _select_eval_metric(flat_metrics: Dict[str, float], metric_key: str, log_prefix: str) -> Optional[float]:
+        lower_lookup = {str(k).lower(): k for k in flat_metrics.keys()}
+
+        def _get_casefolded(k: str) -> Optional[float]:
+            canonical = lower_lookup.get(k.lower())
+            if canonical is None:
+                return None
+            return float(flat_metrics[canonical])
+
         # 1. Try exact match.
         key = metric_key.strip()
         if key in flat_metrics:
             return float(flat_metrics[key])
+        match = _get_casefolded(key)
+        if match is not None:
+            return match
 
-        # 2. Try stripping log prefix (e.g. "val/edge/AP" -> "edge/AP").
+        # 2. Try stripping log prefix (e.g. "val/edge/AP_pr" -> "edge/AP_pr").
         prefix = f"{log_prefix}/"
         if key.startswith(prefix):
             key_without_prefix = key[len(prefix) :]
             if key_without_prefix in flat_metrics:
                 return float(flat_metrics[key_without_prefix])
+            match = _get_casefolded(key_without_prefix)
+            if match is not None:
+                return match
 
         return None
 
@@ -845,9 +888,14 @@ class Trainer(object):
         eval_max_dist = float(target.get("max_dist", 0.0075))
         eval_apply_nms = bool(target.get("apply_nms", False))
         eval_apply_thinning = bool(target.get("apply_thinning", False))
+        eval_protocol = target.get("protocol", None)
+        eval_ap_mode = str(target.get("ap_mode", "bsds_interp"))
+        eval_include_generic_metrics = bool(target.get("include_generic_metrics", eval_mode != "edge"))
+        eval_edge_keys_mode = str(target.get("edge_keys_mode", "legacy_minimal" if eval_mode == "edge" else "full"))
         eval_nproc = int(target.get("nproc", 4))
         eval_preview_limit = int(target.get("preview_limit", 12))
-        eval_select_metric = str(target.get("select_best_metric", "generic/AP"))
+        default_select_metric = "edge/AP" if eval_mode == "edge" else "generic/AP_pixel"
+        eval_select_metric = str(target.get("select_best_metric", default_select_metric))
 
         if eval_loader is None:
             raise RuntimeError(f"Eval target '{target_name}' has no loader")
@@ -959,6 +1007,10 @@ class Trainer(object):
             max_dist=eval_max_dist,
             apply_nms=eval_apply_nms,
             apply_thinning=eval_apply_thinning,
+            protocol=eval_protocol,
+            ap_mode=eval_ap_mode,
+            include_generic_metrics=eval_include_generic_metrics,
+            edge_keys_mode=eval_edge_keys_mode,
             nproc=eval_nproc,
             save_dir=str(step_dir / "edgeeval_json") if eval_mode == "edge" else None,
         )

@@ -71,8 +71,8 @@ sampler:
   batch_size: 1
   sample_num: -1
   use_ema: False
-  save_folder: './training/rwtd_eval_from_pretrained/preds_test'
-  ckpt_path: 'training/synthetic_texture_swin_unet12_disloss_bs2x8/model-best.pt'
+  save_folder: './training/rwtd_eval_from_synth/preds_test'
+  ckpt_path: 'training/synthetic_food_stitched/model-last.pt'
   eval_enabled: True
   eval_mode: edge
   eval_gt_dir: 'RWTD_5050/edge/test'
