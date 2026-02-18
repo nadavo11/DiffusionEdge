@@ -25,6 +25,13 @@ from denoising_diffusion_pytorch.utils import create_logger, cycle, dict2str, ex
 from eval.eval import evaluate_dataset, flatten_metrics
 from eval.previews import make_previews
 from eval.run_params import save_run_params
+from denoising_diffusion_pytorch.lora import (
+    inject_lora,
+    load_lora_state_dict,
+    print_linear_modules,
+    save_lora_checkpoint,
+    set_trainable_lora_only,
+)
 
 try:
     import wandb as _wandb
@@ -142,6 +149,12 @@ def _load_mat_edge01(path: Path) -> np.ndarray:
 def parse_args():
     parser = argparse.ArgumentParser(description="Train conditional latent diffusion model")
     parser.add_argument("--cfg", help="experiment configure file name", type=str, required=True)
+    parser.add_argument(
+        "--dry_run_lora",
+        action="store_true",
+        default=False,
+        help="Build model, inject LoRA, run 1 fwd/bwd on dummy data, print stats, then exit.",
+    )
     args = parser.parse_args()
     args.cfg = load_conf(args.cfg)
     return args
@@ -438,6 +451,62 @@ def main(args):
         cfg=model_cfg,
     )
 
+    # -- LoRA injection (after base checkpoint is loaded inside LDM) --
+    lora_cfg = _cfg_to_dict(cfg.get("lora", {}))
+    if lora_cfg.get("enabled", False):
+        lora_r = int(lora_cfg.get("r", 8))
+        lora_alpha = float(lora_cfg.get("alpha", 16.0))
+        lora_dropout = float(lora_cfg.get("dropout", 0.05))
+        lora_targets = [t.strip() for t in str(lora_cfg.get("targets", "q_lin,k_lin,v_lin")).split(",")]
+
+        print_linear_modules(ldm)  # debug dump
+        injected_names = inject_lora(
+            ldm, target_patterns=lora_targets, r=lora_r, alpha=lora_alpha, dropout=lora_dropout
+        )
+
+        # Optionally load pre-existing LoRA weights
+        lora_ckpt = lora_cfg.get("ckpt_path", None)
+        if lora_ckpt:
+            load_lora_state_dict(ldm, lora_ckpt)
+
+        set_trainable_lora_only(ldm)
+
+        # Store resolved values back for Trainer
+        lora_cfg["_injected_names"] = injected_names
+        lora_cfg["_r"] = lora_r
+        lora_cfg["_alpha"] = lora_alpha
+        lora_cfg["_targets"] = lora_targets
+
+    # -- Dry-run mode: one forward+backward, then exit --
+    if getattr(args, "dry_run_lora", False):
+        print("\n=== LoRA dry-run mode ===")
+        if not lora_cfg.get("enabled", False):
+            print("[WARN] --dry_run_lora set but lora.enabled is False in config. Exiting.")
+        else:
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            ldm = ldm.to(device)
+            ldm.train()
+            # Dummy forward
+            img_h, img_w = model_cfg.image_size
+            dummy_batch = {
+                "image": torch.randn(1, 1, img_h, img_w, device=device),
+                "cond": torch.randn(1, 3, img_h, img_w, device=device),
+            }
+            ldm.on_train_batch_start(dummy_batch)
+            loss, log_dict = ldm.training_step(dummy_batch)
+            loss.backward()
+            print(f"[dry-run] loss = {loss.item():.6f}")
+            print(f"[dry-run] grad norms (first 5 LoRA params):")
+            shown = 0
+            for n, p in ldm.named_parameters():
+                if p.requires_grad and p.grad is not None:
+                    print(f"  {n}: grad_norm={p.grad.norm().item():.6f}")
+                    shown += 1
+                    if shown >= 5:
+                        break
+            print("\n✓ Dry-run complete. Exiting.")
+        return
+
     data_cfg = cfg.data
     if data_cfg["name"] != "edge":
         raise NotImplementedError(f"Unsupported dataset type: {data_cfg['name']}")
@@ -536,6 +605,7 @@ def main(args):
         checkpoint_folder=train_cfg.get("checkpoint_folder", None),
         eval_targets=eval_targets,
         eval_cfg=eval_cfg,
+        lora_cfg=lora_cfg,
     )
 
     trainer.train()
@@ -563,6 +633,7 @@ class Trainer(object):
         cfg={},
         eval_targets: Optional[List[Dict[str, Any]]] = None,
         eval_cfg: Optional[Dict[str, Any]] = None,
+        lora_cfg: Optional[Dict[str, Any]] = None,
     ):
         super().__init__()
         ddp_handler = DistributedDataParallelKwargs(find_unused_parameters=True)
@@ -573,6 +644,11 @@ class Trainer(object):
         )
         self.enable_resume = cfg.trainer.get("enable_resume", False)
         self.accelerator.native_amp = amp
+
+        # LoRA config
+        self.lora_cfg = lora_cfg or {}
+        self.lora_enabled = bool(self.lora_cfg.get("enabled", False))
+        self.lora_save_only = bool(self.lora_cfg.get("save_lora_only", True)) if self.lora_enabled else False
 
         self.model = model
 
@@ -705,6 +781,21 @@ class Trainer(object):
         if not self.accelerator.is_local_main_process:
             return
 
+        # --- LoRA-only checkpoint ---
+        if self.lora_enabled and self.lora_save_only:
+            save_lora_checkpoint(
+                model=self.accelerator.unwrap_model(self.model),
+                save_dir=self.checkpoint_folder,
+                step=self.step,
+                r=int(self.lora_cfg.get("_r", 8)),
+                alpha=float(self.lora_cfg.get("_alpha", 16.0)),
+                targets=self.lora_cfg.get("_targets", []),
+                base_ckpt_path=self.lora_cfg.get("base_ckpt_ref", None),
+                tag=f"lora-{milestone}",
+            )
+            return
+
+        # --- Standard checkpoint ---
         filename = f"model-{milestone}.pt"
         save_path = str(self.checkpoint_folder / filename)
 

@@ -7,6 +7,8 @@
 
 This README is rewritten for the current code in this repository, with special focus on training and evaluation workflows for **RWTD** and custom datasets such as **seams**.
 
+For the dedicated LoRA fine-tuning workflow, see `README_LORA_TRAINING.md`.
+
 ## 1. Repository Entry Points
 
 | Script | Purpose | Inputs | Outputs |
@@ -296,6 +298,7 @@ The shared evaluator lives in:
 | Name | Default | Type | Description |
 |---|---|---|---|
 | `--cfg` | None (required) | `str` | YAML config path for latent diffusion training |
+| `--dry_run_lora` | `False` | flag | Build model, inject LoRA, run 1 dummy forward/backward, print LoRA grad stats, then exit |
 
 ### 6.3 `sample_cond_ldm.py`
 
@@ -365,7 +368,7 @@ The shared evaluator lives in:
 | `trainer.eval.num_batches` | `64` | `int` | Cap eval iterations (`-1` for full set) |
 | `trainer.eval.mode` | `edge` | `str` | `binary` (sklearn) or `edge` (pyEdgeEval + sklearn) |
 | `trainer.eval.preview_limit` | `12` | `int` | Max triplets/previews logged per eval run |
-| `trainer.eval.select_best_metric` | `edge/AP_pr` | `str` | Metric key used for best-eval tracking (legacy aliases like `edge/AP` still accepted) |
+| `trainer.eval.select_best_metric` | `edge/AP` | `str` | Metric key used for best-eval tracking (default edge-mode key in current code path) |
 | `trainer.eval.rwtd.enabled` | `False` | `bool` | Enable an additional RWTD eval target in the same step-0/periodic loop |
 | `trainer.eval.rwtd.num_batches` | `8` | `int` | Small RWTD subset size per eval cycle |
 
