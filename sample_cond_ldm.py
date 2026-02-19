@@ -238,8 +238,9 @@ def main(args):
         cfg=model_cfg,
     )
 
-    # -- LoRA injection for inference --
+    # -- Parse LoRA config (injection deferred until after Sampler loads base checkpoint) --
     lora_ckpt_path = getattr(args, "lora_ckpt", None)
+    _lora_cfg = None  # will be set if LoRA is requested
     if lora_ckpt_path is not None:
         lora_ckpt_path = Path(lora_ckpt_path)
         if not lora_ckpt_path.is_file():
@@ -279,9 +280,7 @@ def main(args):
                 targets = ["q_lin", "k_lin", "v_lin"]
             print(f"[LoRA] Flat checkpoint: r={inferred_r}, alpha={alpha}")
 
-        inject_lora(ldm, target_patterns=targets, r=inferred_r, alpha=alpha, dropout=0.0)
-        load_lora_state_dict(ldm, lora_ckpt_path)
-        print(f"[LoRA] Loaded LoRA weights for inference from {lora_ckpt_path}")
+        _lora_cfg = {"r": inferred_r, "alpha": alpha, "targets": targets, "path": lora_ckpt_path}
 
     data_cfg = cfg.data
     if data_cfg["name"] != "edge":
@@ -308,6 +307,18 @@ def main(args):
         results_folder=sampler_cfg.save_folder,
         cfg=cfg,
     )
+
+    # -- Inject LoRA AFTER Sampler loaded base checkpoint --
+    if _lora_cfg is not None:
+        # Get the unwrapped model (Sampler may have wrapped it with DDP/accelerate)
+        model_ref = sampler.accelerator.unwrap_model(sampler.model)
+        device = sampler.accelerator.device
+        inject_lora(model_ref, target_patterns=_lora_cfg["targets"],
+                     r=_lora_cfg["r"], alpha=_lora_cfg["alpha"], dropout=0.0)
+        load_lora_state_dict(model_ref, _lora_cfg["path"])
+        # Move LoRA params to model device (they were loaded on CPU)
+        model_ref.to(device)
+        print(f"[LoRA] Loaded LoRA weights for inference from {_lora_cfg['path']} (device={device})")
 
     save_run_params(_cfg_to_dict(cfg), sampler.results_folder, prefix="sample")
     outputs = sampler.sample()
