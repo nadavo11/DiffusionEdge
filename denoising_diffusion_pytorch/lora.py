@@ -263,19 +263,35 @@ def load_lora_state_dict(
 ) -> None:
     """Load LoRA-only state dict onto a model that already has LoRA injected.
 
-    Supports two checkpoint formats:
+    Supports three checkpoint formats:
       - Flat:    {"model.x.lora_A": tensor, "model.x.lora_B": tensor, ...}
       - Wrapped: {"step": int, "r": int, "alpha": float, "targets": list,
-                  "lora": {"model.x.lora_A": tensor, ...}}
+                  "lora": {<flat or nested>}}
+      - Nested:  {"model.x.q_lin": {"lora_A": tensor, "lora_B": tensor}, ...}
     """
     path = Path(path)
     raw = torch.load(str(path), map_location="cpu")
 
-    # Auto-detect format
+    # Auto-detect wrapped format
     if isinstance(raw, dict) and "lora" in raw and isinstance(raw["lora"], dict):
-        sd = raw["lora"]  # wrapped format
+        sd = raw["lora"]  # wrapped format — extract inner dict
     else:
-        sd = raw  # flat format
+        sd = raw  # flat or nested format
+
+    # Auto-detect nested format and flatten:
+    # {"module.q_lin": {"lora_A": tensor, ...}} → {"module.q_lin.lora_A": tensor, ...}
+    flat_sd: Dict[str, torch.Tensor] = {}
+    for key, value in sd.items():
+        if isinstance(value, dict):
+            # Nested: value is {"lora_A": tensor, "lora_B": tensor, ...}
+            for sub_key, tensor in value.items():
+                if isinstance(tensor, torch.Tensor):
+                    flat_sd[f"{key}.{sub_key}"] = tensor
+        elif isinstance(value, torch.Tensor):
+            flat_sd[key] = value
+        # Skip non-tensor, non-dict values (e.g. metadata)
+
+    sd = flat_sd
 
     # Filter model state dict to only LoRA keys
     model_lora_keys = {
