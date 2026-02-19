@@ -244,22 +244,36 @@ def main(args):
         lora_ckpt_path = Path(lora_ckpt_path)
         if not lora_ckpt_path.is_file():
             raise FileNotFoundError(f"LoRA checkpoint not found: {lora_ckpt_path}")
-        # Load config from the JSON sidecar (same directory, tag_config.json)
-        # e.g. lora-best_step100.pt → lora-best_config.json
-        lora_tag = lora_ckpt_path.stem.rsplit("_step", 1)[0]  # "lora-best"
-        lora_config_path = lora_ckpt_path.parent / f"{lora_tag}_config.json"
-        if lora_config_path.is_file():
-            import json as _json
-            with open(lora_config_path, "r") as f:
-                lora_meta = _json.load(f)
-            r = int(lora_meta.get("r", 8))
-            alpha = float(lora_meta.get("alpha", 16.0))
+
+        # 1. Infer r from checkpoint tensor shapes (most reliable)
+        lora_sd = torch.load(str(lora_ckpt_path), map_location="cpu")
+        lora_A_keys = [k for k in lora_sd.keys() if "lora_A" in k]
+        if not lora_A_keys:
+            raise RuntimeError(f"No lora_A tensors found in {lora_ckpt_path}")
+        inferred_r = lora_sd[lora_A_keys[0]].shape[0]
+
+        # 2. Try to find config JSON for alpha and targets
+        #    Try patterns: "lora-best_config.json", "lora-best_step*" stem, etc.
+        import json as _json
+        lora_meta = None
+        stem = lora_ckpt_path.stem  # e.g. "lora-best" or "lora-best_step100"
+        for candidate_stem in [stem.rsplit("_step", 1)[0], stem]:
+            candidate = lora_ckpt_path.parent / f"{candidate_stem}_config.json"
+            if candidate.is_file():
+                with open(candidate, "r") as f:
+                    lora_meta = _json.load(f)
+                break
+
+        if lora_meta is not None:
+            alpha = float(lora_meta.get("alpha", inferred_r))
             targets = lora_meta.get("targets", ["q_lin", "k_lin", "v_lin"])
+            print(f"[LoRA] Config JSON loaded: r={inferred_r}, alpha={alpha}, targets={targets}")
         else:
-            # Fall back to defaults if no config JSON found
-            print(f"[LoRA] No config JSON found at {lora_config_path}, using defaults (r=8, alpha=16)")
-            r, alpha, targets = 8, 16.0, ["q_lin", "k_lin", "v_lin"]
-        inject_lora(ldm, target_patterns=targets, r=r, alpha=alpha, dropout=0.0)
+            alpha = float(inferred_r)  # scale=1 is safe default
+            targets = ["q_lin", "k_lin", "v_lin"]
+            print(f"[LoRA] No config JSON found, inferred from checkpoint: r={inferred_r}, alpha={alpha}")
+
+        inject_lora(ldm, target_patterns=targets, r=inferred_r, alpha=alpha, dropout=0.0)
         load_lora_state_dict(ldm, lora_ckpt_path)
         print(f"[LoRA] Loaded LoRA weights for inference from {lora_ckpt_path}")
 
