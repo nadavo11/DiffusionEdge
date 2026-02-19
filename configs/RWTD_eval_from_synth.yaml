@@ -8,7 +8,7 @@ model:
   only_model: False
   timesteps: 1000
   train_sample: -1
-  sampling_timesteps: 5
+  sampling_timesteps: 80
   loss_type: l2
   objective: pred_KC
   start_dist: normal

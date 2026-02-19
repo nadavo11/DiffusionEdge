@@ -84,6 +84,7 @@ data:
   eval_split: test
   strict_split: True
   augment_horizontal_flip: True
+  max_train_samples: 32          # 0 = use all; set e.g. 50 to train on only 50 images
   batch_size: 2
   num_workers: 4
 

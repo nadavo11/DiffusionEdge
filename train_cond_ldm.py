@@ -519,6 +519,20 @@ def main(args):
         split=train_split,
         cfg=data_cfg,
     )
+
+    # Optional: limit the number of unique training samples
+    max_train_samples = int(data_cfg.get("max_train_samples", 0))
+    if max_train_samples > 0 and max_train_samples < len(dataset):
+        import random as _rand
+        full_size = len(dataset)
+        rng = _rand.Random(42)  # fixed seed → reproducible subset
+        indices = rng.sample(range(full_size), max_train_samples)
+        indices.sort()  # keep original ordering
+        dataset = torch.utils.data.Subset(dataset, indices)
+        print(f"[data] Subset training set to {max_train_samples} / {full_size} samples")
+    else:
+        print(f"[data] Using full training set: {len(dataset)} samples")
+
     dl = DataLoader(
         dataset,
         batch_size=data_cfg.batch_size,

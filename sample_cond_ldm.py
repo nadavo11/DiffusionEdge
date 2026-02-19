@@ -23,6 +23,7 @@ from denoising_diffusion_pytorch.utils import unnormalize_to_zero_to_one
 from eval.eval import evaluate_dataset, flatten_metrics
 from eval.previews import make_previews
 from eval.run_params import save_run_params
+from denoising_diffusion_pytorch.lora import inject_lora, load_lora_state_dict
 
 
 def parse_args():
@@ -47,6 +48,12 @@ def parse_args():
     parser.add_argument("--eval_nproc", type=int, default=None)
     parser.add_argument("--eval_preview_limit", type=int, default=None)
     parser.add_argument("--eval_out_dir", type=str, default=None)
+    parser.add_argument(
+        "--lora_ckpt",
+        type=str,
+        default=None,
+        help="Path to LoRA checkpoint (.pt). The matching lora_config.json is loaded automatically.",
+    )
 
     args = parser.parse_args()
     args.cfg = load_conf(args.cfg)
@@ -230,6 +237,31 @@ def main(args):
         use_l1=model_cfg.get("use_l1", True),
         cfg=model_cfg,
     )
+
+    # -- LoRA injection for inference --
+    lora_ckpt_path = getattr(args, "lora_ckpt", None)
+    if lora_ckpt_path is not None:
+        lora_ckpt_path = Path(lora_ckpt_path)
+        if not lora_ckpt_path.is_file():
+            raise FileNotFoundError(f"LoRA checkpoint not found: {lora_ckpt_path}")
+        # Load config from the JSON sidecar (same directory, tag_config.json)
+        # e.g. lora-best_step100.pt → lora-best_config.json
+        lora_tag = lora_ckpt_path.stem.rsplit("_step", 1)[0]  # "lora-best"
+        lora_config_path = lora_ckpt_path.parent / f"{lora_tag}_config.json"
+        if lora_config_path.is_file():
+            import json as _json
+            with open(lora_config_path, "r") as f:
+                lora_meta = _json.load(f)
+            r = int(lora_meta.get("r", 8))
+            alpha = float(lora_meta.get("alpha", 16.0))
+            targets = lora_meta.get("targets", ["q_lin", "k_lin", "v_lin"])
+        else:
+            # Fall back to defaults if no config JSON found
+            print(f"[LoRA] No config JSON found at {lora_config_path}, using defaults (r=8, alpha=16)")
+            r, alpha, targets = 8, 16.0, ["q_lin", "k_lin", "v_lin"]
+        inject_lora(ldm, target_patterns=targets, r=r, alpha=alpha, dropout=0.0)
+        load_lora_state_dict(ldm, lora_ckpt_path)
+        print(f"[LoRA] Loaded LoRA weights for inference from {lora_ckpt_path}")
 
     data_cfg = cfg.data
     if data_cfg["name"] != "edge":
