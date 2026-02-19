@@ -245,33 +245,39 @@ def main(args):
         if not lora_ckpt_path.is_file():
             raise FileNotFoundError(f"LoRA checkpoint not found: {lora_ckpt_path}")
 
-        # 1. Infer r from checkpoint tensor shapes (most reliable)
-        lora_sd = torch.load(str(lora_ckpt_path), map_location="cpu")
-        lora_A_keys = [k for k in lora_sd.keys() if "lora_A" in k]
-        if not lora_A_keys:
-            raise RuntimeError(f"No lora_A tensors found in {lora_ckpt_path}")
-        inferred_r = lora_sd[lora_A_keys[0]].shape[0]
+        # Load and auto-detect format
+        raw = torch.load(str(lora_ckpt_path), map_location="cpu")
 
-        # 2. Try to find config JSON for alpha and targets
-        #    Try patterns: "lora-best_config.json", "lora-best_step*" stem, etc.
-        import json as _json
-        lora_meta = None
-        stem = lora_ckpt_path.stem  # e.g. "lora-best" or "lora-best_step100"
-        for candidate_stem in [stem.rsplit("_step", 1)[0], stem]:
-            candidate = lora_ckpt_path.parent / f"{candidate_stem}_config.json"
-            if candidate.is_file():
-                with open(candidate, "r") as f:
-                    lora_meta = _json.load(f)
-                break
-
-        if lora_meta is not None:
-            alpha = float(lora_meta.get("alpha", inferred_r))
-            targets = lora_meta.get("targets", ["q_lin", "k_lin", "v_lin"])
-            print(f"[LoRA] Config JSON loaded: r={inferred_r}, alpha={alpha}, targets={targets}")
+        if isinstance(raw, dict) and "lora" in raw and isinstance(raw["lora"], dict):
+            # Wrapped format: {step, r, alpha, targets, lora: {weights}}
+            inferred_r = int(raw.get("r", 8))
+            alpha = float(raw.get("alpha", inferred_r))
+            targets = raw.get("targets", ["q_lin", "k_lin", "v_lin"])
+            print(f"[LoRA] Wrapped checkpoint: r={inferred_r}, alpha={alpha}, targets={targets}")
         else:
-            alpha = float(inferred_r)  # scale=1 is safe default
-            targets = ["q_lin", "k_lin", "v_lin"]
-            print(f"[LoRA] No config JSON found, inferred from checkpoint: r={inferred_r}, alpha={alpha}")
+            # Flat format: {key: tensor, ...} — infer r from tensor shapes
+            lora_A_keys = [k for k in raw.keys() if "lora_A" in k]
+            if not lora_A_keys:
+                raise RuntimeError(f"No lora_A tensors found in {lora_ckpt_path}")
+            inferred_r = raw[lora_A_keys[0]].shape[0]
+
+            # Try to find config JSON for alpha
+            import json as _json
+            lora_meta = None
+            stem = lora_ckpt_path.stem
+            for candidate_stem in [stem.rsplit("_step", 1)[0], stem]:
+                candidate = lora_ckpt_path.parent / f"{candidate_stem}_config.json"
+                if candidate.is_file():
+                    with open(candidate, "r") as f:
+                        lora_meta = _json.load(f)
+                    break
+            if lora_meta is not None:
+                alpha = float(lora_meta.get("alpha", inferred_r))
+                targets = lora_meta.get("targets", ["q_lin", "k_lin", "v_lin"])
+            else:
+                alpha = float(inferred_r)
+                targets = ["q_lin", "k_lin", "v_lin"]
+            print(f"[LoRA] Flat checkpoint: r={inferred_r}, alpha={alpha}")
 
         inject_lora(ldm, target_patterns=targets, r=inferred_r, alpha=alpha, dropout=0.0)
         load_lora_state_dict(ldm, lora_ckpt_path)
